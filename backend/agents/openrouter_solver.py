@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import model_id_from_spec, provider_from_spec
 from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
-from backend.solver_base import CANCELLED, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
+from backend.solver_base import CANCELLED, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
 from backend.tracing import SolverTracer
 from backend.tools.core import (
     do_bash,
@@ -338,7 +339,11 @@ class OpenRouterSolver:
         total_tool_calls = 0
         appended_initial_prompt = any(m.get("role") == "user" for m in self._messages)
 
-        max_tool_calls = 24
+        # Reduce load and the chance of repeatedly hitting rate limits.
+        max_tool_calls = 12
+
+        debug_model_substr = os.getenv("CTF_AGENT_DEBUG_MODEL", "").strip()
+        debug_enabled = bool(debug_model_substr) and (debug_model_substr in self.model_spec)
         while not self.cancel_event.is_set():
             # Add an initial user prompt if we don't already have one (bump() may add one).
             if not appended_initial_prompt:
@@ -367,16 +372,96 @@ class OpenRouterSolver:
             headers = {"Authorization": f"Bearer {self.settings.openrouter_api_key}"}
             url = "https://openrouter.ai/api/v1/chat/completions"
 
-            try:
-                async with httpx.AsyncClient(timeout=180.0) as client:
-                    resp = await client.post(url, headers=headers, json=request_body)
-                resp.raise_for_status()
-                data = resp.json()
-            except Exception as e:
-                logger.error("[%s] OpenRouter error: %s", self.agent_name, e, exc_info=True)
-                self._findings = f"Error: {e}"
-                self.tracer.event("error", error=str(e))
-                return self._result(ERROR, run_cost=None, run_steps=self._step_count)
+            # Retry for rate limits and transient network errors.
+            retries = 0
+            max_retries = 6
+            backoff_s = 3.0
+            while True:
+                try:
+                    async with httpx.AsyncClient(timeout=180.0) as client:
+                        resp = await client.post(url, headers=headers, json=request_body)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    break  # success
+
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code if e.response is not None else None
+                    body_msg = ""
+                    try:
+                        body_msg = (
+                            json.dumps(e.response.json(), ensure_ascii=False)[:500]
+                            if e.response is not None
+                            else ""
+                        )
+                    except Exception:
+                        body_msg = str(e)[:500]
+
+                    if status == 429 and retries < max_retries:
+                        retries += 1
+                        retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+                        wait_s: float | None = None
+                        if retry_after:
+                            try:
+                                wait_s = float(retry_after)
+                            except ValueError:
+                                wait_s = None
+                        if wait_s is None:
+                            wait_s = backoff_s
+                        wait_s = min(90.0, max(1.0, wait_s))
+                        logger.warning(
+                            "[%s] OpenRouter 429 — retry %d/%d in %.1fs: %s",
+                            self.agent_name,
+                            retries,
+                            max_retries,
+                            wait_s,
+                            body_msg[:120],
+                        )
+                        await asyncio.sleep(wait_s)
+                        backoff_s *= 1.7
+                        continue
+
+                    # Retries exhausted or non-429
+                    if status == 429:
+                        self._findings = f"OpenRouter 429 after retries: {body_msg}"
+                        self.tracer.event("error", error=self._findings)
+                        return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
+
+                    logger.error(
+                        "[%s] OpenRouter HTTP error (%s): %s",
+                        self.agent_name,
+                        status,
+                        body_msg[:120],
+                        exc_info=True,
+                    )
+                    self._findings = f"HTTP {status}: {body_msg}"
+                    self.tracer.event("error", error=self._findings)
+                    return self._result(ERROR, run_cost=None, run_steps=self._step_count)
+
+                except (httpx.ReadTimeout, httpx.ConnectError) as e:
+                    if retries < max_retries:
+                        retries += 1
+                        wait_s = min(90.0, backoff_s)
+                        logger.warning(
+                            "[%s] OpenRouter network error — retry %d/%d in %.1fs: %s",
+                            self.agent_name,
+                            retries,
+                            max_retries,
+                            wait_s,
+                            str(e)[:120],
+                        )
+                        await asyncio.sleep(wait_s)
+                        backoff_s *= 1.7
+                        continue
+
+                    self._findings = f"Network error after retries: {e}"
+                    self.tracer.event("error", error=str(e))
+                    return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
+
+                except Exception as e:
+                    logger.error("[%s] OpenRouter error: %s", self.agent_name, e, exc_info=True)
+                    self._findings = f"Error: {e}"
+                    self.tracer.event("error", error=str(e))
+                    return self._result(ERROR, run_cost=None, run_steps=self._step_count)
 
             usage = data.get("usage") or {}
             prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -401,6 +486,18 @@ class OpenRouterSolver:
             assistant_content = msg.get("content") or ""
             reasoning_details = msg.get("reasoning_details")
             tool_calls = msg.get("tool_calls") or []
+
+            if debug_enabled:
+                print("\n" + "=" * 80)
+                print(f"[DEBUG {self.model_id}] assistant_content:\n{assistant_content[:1500]}")
+                if tool_calls:
+                    print(
+                        f"[DEBUG {self.model_id}] tool_calls:\n"
+                        f"{json.dumps(tool_calls, ensure_ascii=False)[:2000]}"
+                    )
+                else:
+                    print(f"[DEBUG {self.model_id}] tool_calls: none")
+                print("=" * 80)
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": assistant_content}
             if reasoning_details is not None:
@@ -469,6 +566,9 @@ class OpenRouterSolver:
                             self.tracer.event("findings_injected", step=self._step_count)
 
                     self.tracer.tool_result(tool_name, tool_result, self._step_count)
+
+                    if debug_enabled:
+                        print(f"[DEBUG {self.model_id}] tool_result {tool_name}: {tool_result[:1200]}")
 
                     # Flag confirmation detection
                     if tool_name == "submit_flag" and any(m in tool_result for m in CORRECT_MARKERS):

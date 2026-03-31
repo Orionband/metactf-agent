@@ -127,6 +127,19 @@ class ChallengeMeta:
         if conn_file.is_file() and not connection_info:
             connection_info = conn_file.read_text(encoding="utf-8", errors="replace").strip()
 
+        # If no explicit connection.txt, try to extract a usable connection string
+        # from the statement / hints text (common for CTFs).
+        if not connection_info:
+            combined = description + "\n" + "\n".join(h.get("content", "") for h in hints[:30])
+            url_match = re.search(r"https?://[^\\s)]+", combined, flags=re.IGNORECASE)
+            if url_match:
+                connection_info = url_match.group(0).strip()
+            else:
+                # Capture lines like: "nc host port"
+                nc_match = re.search(r"(?m)^\\s*(nc\\s+[^\\n\\r]+)$", combined)
+                if nc_match:
+                    connection_info = nc_match.group(1).strip()
+
         return cls(
             name=name,
             category=category,

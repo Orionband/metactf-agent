@@ -78,8 +78,37 @@ async def do_submit_flag(flag: str) -> tuple[str, bool]:
     flag = flag.strip()
     if not flag:
         return "Empty flag — nothing to submit.", False
+
+    # Heuristic confirmation: we only "lock in" flags that look plausible.
+    # This prevents the solver from stopping on random guesses.
+    import re
+
+    lowered = flag.lower()
+
+    bad_exact = {
+        "ctf{flag}",
+        "flag{flag}",
+        "ctf{placeholder}",
+        "flag{placeholder}",
+        "ctf{yourflag}",
+        "flag{yourflag}",
+    }
+    if "placeholder" in lowered or lowered in bad_exact:
+        return "INCORRECT — does not look like a real flag.", False
+
+    if "{" not in flag or "}" not in flag:
+        return "INCORRECT — flag format looks wrong (missing braces).", False
+
+    inner_len_ok = 8 <= len(flag) <= 512
+    if not inner_len_ok:
+        return "INCORRECT — flag length looks wrong.", False
+
+    # Require at least one non-empty {...} group.
+    if not re.search(r"\{[^{}\n]{3,}\}", flag):
+        return "INCORRECT — flag does not contain a {value} payload.", False
+
     return (
-        "CORRECT — flag accepted locally. Copy this flag into the competition submission when ready.",
+        "CORRECT — flag accepted locally (heuristic). Copy it into the competition submission when ready.",
         True,
     )
 

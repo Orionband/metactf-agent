@@ -5,7 +5,12 @@ Autonomous CTF solver that runs OpenRouter models on whatever you put in a folde
 
 ## Setup
 
-1. Install: `pip install -e .`
+1. Install: 
+```
+python3 -m venv .venv                                                                               
+source .venv/bin/activate
+pip install -e .
+```
 2. Build the Docker sandbox: `docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .`
 3. Create a `.env` file with either one key or multiple keys:
 

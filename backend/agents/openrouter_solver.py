@@ -371,16 +371,17 @@ class OpenRouterSolver:
                 ]
 
             keys = self.settings.get_openrouter_keys()
-            key = next_openrouter_key(keys)
-            headers = {"Authorization": f"Bearer {key}"}
             url = "https://openrouter.ai/api/v1/chat/completions"
 
             # Retry for rate limits and transient network errors.
             retries = 0
             max_retries = 6
             backoff_s = 3.0
+            auth_failures: set[str] = set()
             while True:
                 try:
+                    key = next_openrouter_key(keys)
+                    headers = {"Authorization": f"Bearer {key}"}
                     async with httpx.AsyncClient(timeout=180.0) as client:
                         resp = await client.post(url, headers=headers, json=request_body)
                     resp.raise_for_status()
@@ -398,6 +399,26 @@ class OpenRouterSolver:
                         )
                     except Exception:
                         body_msg = str(e)[:500]
+
+                    # Auth failure: try other keys first (if available), then fail clearly.
+                    if status in (401, 403):
+                        auth_failures.add(key)
+                        if len(auth_failures) < len(keys):
+                            logger.warning(
+                                "[%s] OpenRouter auth failed for one key (%s); trying next key",
+                                self.agent_name,
+                                status,
+                            )
+                            retries += 1
+                            await asyncio.sleep(0.2)
+                            continue
+                        self._findings = (
+                            f"OpenRouter authentication failed (HTTP {status}). "
+                            "All configured API keys were rejected. "
+                            "Check OPENROUTER_API_KEY / OPENROUTER_API_KEYS."
+                        )
+                        self.tracer.event("error", error=self._findings)
+                        return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     if status == 429 and retries < max_retries:
                         retries += 1

@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from backend.agents.solver import Solver
+from backend.agents.openrouter_solver import OpenRouterSolver
 from backend.cost_tracker import CostTracker
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS
@@ -51,8 +51,8 @@ class ChallengeSwarm:
     _last_submit_time: dict[str, float] = field(default_factory=dict)
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
 
-    def _create_solver(self, model_spec: str) -> Solver:
-        solver = Solver(
+    def _create_solver(self, model_spec: str) -> OpenRouterSolver:
+        solver = OpenRouterSolver(
             model_spec=model_spec,
             challenge_dir=self.challenge_dir,
             meta=self.meta,

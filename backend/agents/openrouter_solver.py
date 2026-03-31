@@ -479,6 +479,19 @@ class OpenRouterSolver:
                         self.tracer.event("error", error=self._findings)
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
+                    bm_low = body_msg.lower()
+                    if status == 404 and any(
+                        s in bm_low for s in ("guardrail", "data policy", "privacy")
+                    ):
+                        hint = (
+                            "OpenRouter 404: no endpoint matches your account privacy/guardrail settings "
+                            "(https://openrouter.ai/settings/privacy). Relax data-policy filters or choose another model."
+                        )
+                        self._findings = f"{hint} API: {body_msg[:400]}"
+                        logger.warning("[%s] %s", self.agent_name, hint)
+                        self.tracer.event("error", error=self._findings)
+                        return self._result(ERROR, run_cost=None, run_steps=self._step_count)
+
                     logger.error(
                         "[%s] OpenRouter HTTP error (%s): %s",
                         self.agent_name,

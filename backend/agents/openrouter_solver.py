@@ -33,6 +33,7 @@ from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
 from backend.tracing import SolverTracer
+from backend.openrouter_key_pool import next_openrouter_key
 from backend.tools.core import (
     do_bash,
     do_check_findings,
@@ -369,7 +370,9 @@ class OpenRouterSolver:
                     for t in self._tool_defs.values()
                 ]
 
-            headers = {"Authorization": f"Bearer {self.settings.openrouter_api_key}"}
+            keys = self.settings.get_openrouter_keys()
+            key = next_openrouter_key(keys)
+            headers = {"Authorization": f"Bearer {key}"}
             url = "https://openrouter.ai/api/v1/chat/completions"
 
             # Retry for rate limits and transient network errors.

@@ -18,6 +18,7 @@ from backend.solver_base import (
     ERROR,
     FLAG_FOUND,
     GAVE_UP,
+    QUOTA_ERROR,
     SolverProtocol,
     SolverResult,
 )
@@ -171,6 +172,14 @@ class ChallengeSwarm:
             if result.status == CANCELLED:
                 break
 
+            if result.status == QUOTA_ERROR:
+                logger.warning(
+                    "[%s/%s] Quota/rate-limited — stopping this model for now",
+                    self.meta.name,
+                    model_spec,
+                )
+                break
+
             if result.status in (GAVE_UP, ERROR):
                 if result.step_count == 0 and result.cost_usd == 0:
                     logger.warning(
@@ -230,6 +239,12 @@ class ChallengeSwarm:
                 tasks = list(pending)
 
             self.cancel_event.set()
+            return self.winner
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            self.cancel_event.set()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             return self.winner
         except Exception as e:
             logger.error("[%s] Swarm error: %s", self.meta.name, e, exc_info=True)

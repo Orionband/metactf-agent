@@ -1,17 +1,23 @@
 # CTF Agent
 
-Autonomous CTF solver that runs **three OpenRouter models in parallel** on whatever you put in a folder. **You do not need a YAML file** — optional `metadata.yml` is still supported if you want points/category metadata.
+Autonomous CTF solver that runs OpenRouter models on whatever you put in a folder.
 
 
 ## Setup
 
 1. Install: `pip install -e .`
 2. Build the Docker sandbox: `docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .`
-3. Create a `.env` file with:
+3. Create a `.env` file with either one key or multiple keys:
 
    ```env
+   # single-key mode
    OPENROUTER_API_KEY=sk-or-v1-...
+
+   # multi-key mode (comma/newline separated)
+   OPENROUTER_API_KEYS=sk-or-v1-key1,sk-or-v1-key2,sk-or-v1-key3
    ```
+
+When multiple keys are present, solver requests are distributed in round-robin order across keys.
 
 ## Run
 
@@ -36,11 +42,19 @@ If the folder is named `challenge` in the current directory, you can run:
 ctf-solve
 ```
 
-The agent always uses these three models together:
+Default model lineup:
 
 - `qwen/qwen3.6-plus-preview:free`
 - `nvidia/nemotron-3-super-120b-a12b:free`
 - `stepfun/step-3.5-flash:free`
+
+Run just one model with:
+
+```bash
+ctf-solve path/to/challenge --model openrouter/qwen/qwen3.6-plus-preview:free
+```
+
+You can also omit the prefix: `--model qwen/qwen3.6-plus-preview:free`.
 
 When a flag is found, it prints in the terminal. You submit it to the competition site yourself if there is one.
 
@@ -58,9 +72,15 @@ Each **subfolder** of `parent` is one challenge. A coordinator process manages t
 ctf-solve ./my-challenge --no-submit
 ```
 
-## Optional `metadata.yml`
+### Debug one model's responses
 
-If you already have a `metadata.yml` (points, category, extra hints), it is merged in. Plain folders without YAML work fine.
+```bash
+export CTF_AGENT_DEBUG_MODEL="qwen/qwen3.6-plus-preview"
+ctf-solve ./my-challenge
+# disable
+unset CTF_AGENT_DEBUG_MODEL
+```
+
 
 ## Requirements
 

@@ -42,6 +42,12 @@ def _setup_logging(verbose: bool = False) -> None:
     help="Watch a directory of challenge subfolders and run the coordinator (advanced).",
 )
 @click.option(
+    "--model",
+    "single_model",
+    default=None,
+    help="Run only one model (e.g. openrouter/qwen/qwen3.6-plus-preview:free).",
+)
+@click.option(
     "--no-submit",
     is_flag=True,
     help="Dry run — solvers will not lock in a flag via submit_flag.",
@@ -50,6 +56,7 @@ def _setup_logging(verbose: bool = False) -> None:
 def main(
     challenge_dir: Path | None,
     watch_dir: Path | None,
+    single_model: str | None,
     no_submit: bool,
     verbose: bool,
 ) -> None:
@@ -72,17 +79,18 @@ def main(
     _setup_logging(verbose)
 
     settings = Settings()
+    model_specs = _select_models(single_model)
 
-    if not settings.openrouter_api_key:
-        console.print("[red]Set OPENROUTER_API_KEY in .env or the environment.[/red]")
+    if not settings.get_openrouter_keys():
+        console.print("[red]Set OPENROUTER_API_KEY or OPENROUTER_API_KEYS in .env or the environment.[/red]")
         sys.exit(1)
 
     if watch_dir is not None:
         console.print("[bold]CTF Agent[/bold] — watch mode (coordinator)")
         console.print(f"  Watching: {watch_dir}")
-        console.print(f"  Models: {', '.join(DEFAULT_MODELS)}")
+        console.print(f"  Models: {', '.join(model_specs)}")
         console.print()
-        asyncio.run(_run_coordinator(settings, str(watch_dir), no_submit))
+        asyncio.run(_run_coordinator(settings, str(watch_dir), no_submit, model_specs))
         return
 
     if challenge_dir is None:
@@ -98,15 +106,27 @@ def main(
 
     console.print("[bold]CTF Agent[/bold]")
     console.print(f"  Folder: {challenge_dir.resolve()}")
-    console.print(f"  Models: {', '.join(DEFAULT_MODELS)}")
+    console.print(f"  Models: {', '.join(model_specs)}")
     console.print()
-    asyncio.run(_run_single(settings, str(challenge_dir), no_submit))
+    asyncio.run(_run_single(settings, str(challenge_dir), no_submit, model_specs))
+
+
+def _select_models(single_model: str | None) -> list[str]:
+    if not single_model:
+        return list(DEFAULT_MODELS)
+    spec = single_model.strip()
+    if not spec:
+        return list(DEFAULT_MODELS)
+    if "/" not in spec or not spec.startswith("openrouter/"):
+        spec = f"openrouter/{spec}"
+    return [spec]
 
 
 async def _run_single(
     settings: Settings,
     challenge_dir: str,
     no_submit: bool,
+    model_specs: list[str],
 ) -> None:
     from backend.agents.swarm import ChallengeSwarm
     from backend.cost_tracker import CostTracker
@@ -114,7 +134,7 @@ async def _run_single(
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
     max_concurrent = settings.max_concurrent_challenges
-    configure_semaphore(max_concurrent * len(DEFAULT_MODELS))
+    configure_semaphore(max_concurrent * len(model_specs))
     await cleanup_orphan_containers()
 
     try:
@@ -131,7 +151,7 @@ async def _run_single(
         meta=meta,
         cost_tracker=cost_tracker,
         settings=settings,
-        model_specs=list(DEFAULT_MODELS),
+        model_specs=model_specs,
         no_submit=no_submit,
     )
 
@@ -151,18 +171,23 @@ async def _run_single(
         for agent_name in cost_tracker.by_agent:
             console.print(f"  {agent_name}: {cost_tracker.format_usage(agent_name)}")
         console.print(f"  [bold]Total: ${cost_tracker.total_cost_usd:.2f}[/bold]")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Stopping... cleaning up containers.[/yellow]")
+        swarm.kill()
+        await asyncio.sleep(0.2)
     finally:
-        pass
+        swarm.kill()
 
 
 async def _run_coordinator(
     settings: Settings,
     challenges_root: str,
     no_submit: bool,
+    model_specs: list[str],
 ) -> None:
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    configure_semaphore(settings.max_concurrent_challenges * len(DEFAULT_MODELS))
+    configure_semaphore(settings.max_concurrent_challenges * len(model_specs))
     await cleanup_orphan_containers()
     console.print("[bold]Coordinator[/bold] (Ctrl+C to stop)...\n")
 
@@ -170,7 +195,7 @@ async def _run_coordinator(
 
     results = await run_openrouter_coordinator(
         settings=settings,
-        model_specs=list(DEFAULT_MODELS),
+        model_specs=model_specs,
         challenges_root=challenges_root,
         no_submit=no_submit,
         coordinator_model=settings.coordinator_model or None,

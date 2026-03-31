@@ -38,11 +38,12 @@ def resolve_model(spec: str, settings: Settings) -> Model:
     if provider != "openrouter":
         raise ValueError(f"Only openrouter is supported; got {spec!r}")
     model_id = model_id_from_spec(spec)
-    if not settings.openrouter_api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set")
+    keys = settings.get_openrouter_keys()
+    if not keys:
+        raise RuntimeError("OPENROUTER_API_KEY / OPENROUTER_API_KEYS is not set")
     return OpenRouterModel(
         model_id,
-        provider=OpenRouterProvider(api_key=settings.openrouter_api_key),
+        provider=OpenRouterProvider(api_key=keys[0]),
     )
 
 

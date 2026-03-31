@@ -461,6 +461,11 @@ class OpenRouterSolver:
 
                     # Retries exhausted or non-429
                     if status == 429:
+                        if "free-models-per-day" in body_msg or "per day" in body_msg.lower():
+                            logger.warning(
+                                "[%s] OpenRouter free-tier daily quota exhausted for available keys/accounts",
+                                self.agent_name,
+                            )
                         self._findings = f"OpenRouter 429 after retries: {body_msg}"
                         self.tracer.event("error", error=self._findings)
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)

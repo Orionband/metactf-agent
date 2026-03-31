@@ -378,6 +378,7 @@ class OpenRouterSolver:
             max_retries = 6
             backoff_s = 3.0
             auth_failures: set[str] = set()
+            rate_limited_keys: set[str] = set()
             while True:
                 try:
                     key = next_openrouter_key(keys)
@@ -420,29 +421,43 @@ class OpenRouterSolver:
                         self.tracer.event("error", error=self._findings)
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
-                    if status == 429 and retries < max_retries:
-                        retries += 1
-                        retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
-                        wait_s: float | None = None
-                        if retry_after:
-                            try:
-                                wait_s = float(retry_after)
-                            except ValueError:
-                                wait_s = None
-                        if wait_s is None:
-                            wait_s = backoff_s
-                        wait_s = min(90.0, max(1.0, wait_s))
-                        logger.warning(
-                            "[%s] OpenRouter 429 — retry %d/%d in %.1fs: %s",
-                            self.agent_name,
-                            retries,
-                            max_retries,
-                            wait_s,
-                            body_msg[:120],
-                        )
-                        await asyncio.sleep(wait_s)
-                        backoff_s *= 1.7
-                        continue
+                    if status == 429:
+                        rate_limited_keys.add(key)
+                        # If we still have untried keys, switch keys immediately
+                        # instead of sleeping on the current limited key.
+                        if len(rate_limited_keys) < len(keys):
+                            logger.warning(
+                                "[%s] OpenRouter 429 on one key; trying next key immediately",
+                                self.agent_name,
+                            )
+                            retries += 1
+                            continue
+
+                        # All keys are currently rate limited; only now back off.
+                        if retries < max_retries:
+                            retries += 1
+                            retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+                            wait_s: float | None = None
+                            if retry_after:
+                                try:
+                                    wait_s = float(retry_after)
+                                except ValueError:
+                                    wait_s = None
+                            if wait_s is None:
+                                wait_s = backoff_s
+                            wait_s = min(90.0, max(1.0, wait_s))
+                            logger.warning(
+                                "[%s] OpenRouter 429 on all keys — retry %d/%d in %.1fs: %s",
+                                self.agent_name,
+                                retries,
+                                max_retries,
+                                wait_s,
+                                body_msg[:120],
+                            )
+                            await asyncio.sleep(wait_s)
+                            backoff_s *= 1.7
+                            rate_limited_keys.clear()
+                            continue
 
                     # Retries exhausted or non-429
                     if status == 429:

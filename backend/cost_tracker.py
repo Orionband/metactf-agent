@@ -21,6 +21,9 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
     "qwen/qwen3.6-plus-preview:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "nvidia/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "minimax/minimax-m2.5:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "gemini-3-flash-preview": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "gemini-2.5-flash": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "gemini-flash-latest": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
 }
 
 

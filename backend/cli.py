@@ -13,7 +13,7 @@ import httpx
 from rich.console import Console
 
 from backend.config import Settings
-from backend.models import DEFAULT_MODELS
+from backend.models import DEFAULT_MODELS, model_id_from_spec
 
 console = Console()
 
@@ -56,6 +56,12 @@ def _setup_logging(verbose: bool = False) -> None:
     help="Include Gemini direct API model (gemini/gemini-flash-latest) in the solver lineup.",
 )
 @click.option(
+    "--gemini-rotate",
+    "gemini_rotate",
+    is_flag=True,
+    help="Use gemini-3-flash-preview first; on 429/503/502/504 switch to gemini-2.5-flash and alternate until success or retries exhausted.",
+)
+@click.option(
     "--check-keys",
     is_flag=True,
     help="Validate each configured OpenRouter key and print per-key status, then exit.",
@@ -71,6 +77,7 @@ def main(
     watch_dir: Path | None,
     single_model: str | None,
     include_gemini: bool,
+    gemini_rotate: bool,
     check_keys: bool,
     no_submit: bool,
     verbose: bool,
@@ -94,6 +101,20 @@ def main(
     _setup_logging(verbose)
 
     settings = Settings()
+    if gemini_rotate:
+        if single_model and not single_model.strip().startswith("gemini/"):
+            console.print("[red]--gemini-rotate only applies to Gemini models; omit --model or use gemini/....[/red]")
+            sys.exit(1)
+        if single_model and single_model.strip().startswith("gemini/"):
+            mid = model_id_from_spec(single_model.strip())
+            if mid == "gemini-2.5-flash":
+                chain = "gemini-2.5-flash,gemini-3-flash-preview"
+            else:
+                chain = "gemini-3-flash-preview,gemini-2.5-flash"
+        else:
+            chain = "gemini-3-flash-preview,gemini-2.5-flash"
+            single_model = "gemini/gemini-3-flash-preview"
+        settings = settings.model_copy(update={"gemini_rotate_chain": chain})
     model_specs = _select_models(single_model, include_gemini)
     openrouter_keys = settings.get_openrouter_keys()
     gemini_keys = settings.get_gemini_keys()
@@ -123,6 +144,8 @@ def main(
             console.print(f"  OpenRouter keys: {len(openrouter_keys)} configured")
         if needs_gemini:
             console.print(f"  Gemini keys: {len(gemini_keys)} configured")
+        if getattr(settings, "gemini_rotate_chain", "").strip():
+            console.print(f"  Gemini rotate: {settings.gemini_rotate_chain}")
         console.print()
         asyncio.run(_run_coordinator(settings, str(watch_dir), no_submit, model_specs))
         return
@@ -145,6 +168,8 @@ def main(
         console.print(f"  OpenRouter keys: {len(openrouter_keys)} configured")
     if needs_gemini:
         console.print(f"  Gemini keys: {len(gemini_keys)} configured")
+    if getattr(settings, "gemini_rotate_chain", "").strip():
+        console.print(f"  Gemini rotate: {settings.gemini_rotate_chain}")
     console.print()
     asyncio.run(_run_single(settings, str(challenge_dir), no_submit, model_specs))
 

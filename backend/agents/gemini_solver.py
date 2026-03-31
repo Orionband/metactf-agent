@@ -41,6 +41,8 @@ FlagPattern = re.compile(r"FLAG\s*:\s*(.+)", re.IGNORECASE)
 ToolHandler = Callable[..., Awaitable[str]]
 
 _MAX_TEXT_ONLY_NUDGES = 5
+_GEMINI_TRANSIENT_HTTP = frozenset({429, 500, 502, 503, 504})
+_GEMINI_MAX_HTTP_ATTEMPTS = 28
 
 
 def _collect_function_calls(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -101,6 +103,16 @@ class GeminiSolver:
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
+        chain_raw = (getattr(settings, "gemini_rotate_chain", None) or "").strip()
+        if chain_raw:
+            ids = [p.strip() for p in chain_raw.split(",") if p.strip()]
+            self._gemini_rotate_ids: tuple[str, ...] = tuple(ids)
+            self._gemini_rotate_index = 0
+            if len(self._gemini_rotate_ids) >= 1:
+                self.model_id = self._gemini_rotate_ids[0]
+        else:
+            self._gemini_rotate_ids = ()
+            self._gemini_rotate_index = 0
         self.challenge_dir = challenge_dir
         self.meta = meta
         self.cost_tracker = cost_tracker
@@ -132,6 +144,101 @@ class GeminiSolver:
         self._flag: str | None = None
         self._findings: str = ""
         self._system_prompt = ""
+        self._gemini_last_error_status: str = ERROR
+
+    def _rotate_gemini_model(self) -> bool:
+        if len(self._gemini_rotate_ids) < 2:
+            return False
+        self._gemini_rotate_index = (self._gemini_rotate_index + 1) % len(self._gemini_rotate_ids)
+        self.model_id = self._gemini_rotate_ids[self._gemini_rotate_index]
+        return True
+
+    async def _gemini_post_with_retries(
+        self,
+        request_body: dict[str, Any],
+        keys: list[str],
+        debug_enabled: bool,
+    ) -> dict[str, Any] | None:
+        """POST generateContent; rotate models on transient HTTP errors and network timeouts."""
+        self._gemini_last_error_status = ERROR
+        last_detail = ""
+        backoff_s = 1.2
+        for attempt in range(_GEMINI_MAX_HTTP_ATTEMPTS):
+            key = next_gemini_key(keys)
+            if debug_enabled:
+                masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***"
+                print(f"[DEBUG {self.model_id}] using Gemini key: {masked}")
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent"
+            headers = {"Content-Type": "application/json", "X-goog-api-key": key}
+
+            try:
+                async with httpx.AsyncClient(timeout=180.0) as client:
+                    resp = await client.post(url, headers=headers, json=request_body)
+            except (httpx.ReadTimeout, httpx.ConnectError) as e:
+                last_detail = f"network: {e}"
+                logger.warning("[%s] Gemini %s — retry %s", self.agent_name, last_detail, attempt + 1)
+                if self._rotate_gemini_model():
+                    logger.warning("[%s] Switched model to %s after network error", self.agent_name, self.model_id)
+                await asyncio.sleep(min(backoff_s * (1.35**min(attempt, 12)), 45.0))
+                continue
+
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except Exception as e:
+                    self._findings = f"Gemini: invalid JSON in 200 response: {e}"
+                    return None
+
+            try:
+                body = json.dumps(resp.json(), ensure_ascii=False)[:900]
+            except Exception:
+                body = resp.text[:900]
+            code = resp.status_code
+            last_detail = f"HTTP {code}: {body}"
+            self._findings = f"Gemini {last_detail}"
+
+            if code in (401,):
+                self._gemini_last_error_status = QUOTA_ERROR
+                logger.warning("[%s] %s", self.agent_name, self._findings[:600])
+                return None
+
+            if code in (403,):
+                self._gemini_last_error_status = QUOTA_ERROR
+                logger.warning("[%s] %s", self.agent_name, self._findings[:600])
+                return None
+
+            if code in _GEMINI_TRANSIENT_HTTP:
+                self._gemini_last_error_status = QUOTA_ERROR
+                rotated = self._rotate_gemini_model()
+                if rotated:
+                    logger.warning(
+                        "[%s] Gemini HTTP %s — switching to model %s (attempt %s/%s)",
+                        self.agent_name,
+                        code,
+                        self.model_id,
+                        attempt + 1,
+                        _GEMINI_MAX_HTTP_ATTEMPTS,
+                    )
+                else:
+                    logger.warning(
+                        "[%s] Gemini HTTP %s — retry %s/%s (no rotate chain)",
+                        self.agent_name,
+                        code,
+                        attempt + 1,
+                        _GEMINI_MAX_HTTP_ATTEMPTS,
+                    )
+                await asyncio.sleep(min(backoff_s * (1.35**min(attempt, 12)), 45.0))
+                continue
+
+            logger.warning("[%s] %s", self.agent_name, self._findings[:600])
+            self._gemini_last_error_status = ERROR
+            return None
+
+        self._findings = f"Gemini: exhausted retries. Last: {last_detail[:800]}"
+        self._gemini_last_error_status = ERROR
+        logger.warning("[%s] %s", self.agent_name, self._findings[:500])
+        return None
 
     async def start(self) -> None:
         if not self.sandbox._container:
@@ -144,7 +251,10 @@ class GeminiSolver:
         self._contents = [{"role": "user", "parts": [{"text": "Solve this CTF challenge."}]}]
         self._build_tools()
         self.tracer.event("start", challenge=self.meta.name, model=self.model_id)
-        logger.info("[%s] Solver started", self.agent_name)
+        if self._gemini_rotate_ids:
+            logger.info("[%s] Solver started (Gemini rotate: %s)", self.agent_name, ", ".join(self._gemini_rotate_ids))
+        else:
+            logger.info("[%s] Solver started", self.agent_name)
 
     def _build_tools(self) -> None:
         async def _bash(command: str, timeout_seconds: int = 60) -> str:
@@ -247,13 +357,6 @@ class GeminiSolver:
             if not keys:
                 self._findings = "No Gemini API key configured (GEMINI_API_KEY / GEMINI_API_KEYS)."
                 return self._result(QUOTA_ERROR)
-            key = next_gemini_key(keys)
-            if debug_enabled:
-                masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***"
-                print(f"[DEBUG {self.model_id}] using Gemini key: {masked}")
-
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:generateContent"
-            headers = {"Content-Type": "application/json", "X-goog-api-key": key}
 
             request_body = {
                 "systemInstruction": {"parts": [{"text": self._system_prompt}]},
@@ -262,26 +365,9 @@ class GeminiSolver:
                 "toolConfig": {"functionCallingConfig": {"mode": "AUTO"}},
             }
 
-            try:
-                async with httpx.AsyncClient(timeout=180.0) as client:
-                    resp = await client.post(url, headers=headers, json=request_body)
-                resp.raise_for_status()
-                data = resp.json()
-            except httpx.HTTPStatusError as e:
-                body = ""
-                try:
-                    body = json.dumps(e.response.json(), ensure_ascii=False)[:800]
-                except Exception:
-                    body = str(e)[:800]
-                code = e.response.status_code if e.response else None
-                self._findings = f"Gemini HTTP {code}: {body}"
-                if code not in (401, 403, 429):
-                    logger.warning("[%s] %s", self.agent_name, self._findings[:600])
-                return self._result(QUOTA_ERROR if (e.response and e.response.status_code in (401, 403, 429)) else ERROR)
-            except Exception as e:
-                logger.warning("[%s] Gemini request failed: %s", self.agent_name, e, exc_info=True)
-                self._findings = f"Gemini error: {e}"
-                return self._result(ERROR)
+            data = await self._gemini_post_with_retries(request_body, keys, debug_enabled)
+            if data is None:
+                return self._result(self._gemini_last_error_status)
 
             usage = data.get("usageMetadata") or {}
             self.cost_tracker.record_tokens(

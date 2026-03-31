@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Debug
     always_debug_single_model: bool = False
 
+    # Gemini: comma-separated model ids to rotate on 429/503/… (see --gemini-rotate)
+    gemini_rotate_chain: str = ""
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     def get_openrouter_keys(self) -> list[str]:

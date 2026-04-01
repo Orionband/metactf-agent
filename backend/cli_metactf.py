@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import shutil
 import sys
@@ -33,6 +34,7 @@ from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 from backend.solver_base import FLAG_FOUND
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 QWEN_SPEC = "openrouter/qwen/qwen3.6-plus-preview:free"
 
@@ -186,8 +188,38 @@ async def _run_metactf(
             await cleanup_orphan_containers()
 
             sem = asyncio.Semaphore(settings.max_concurrent_challenges)
+            # Swarms still running (for poll: stop if API marks id solved elsewhere)
+            running_swarms: dict[int, MetaCTFChallengeSwarm] = {}
+            poll_shutdown = asyncio.Event()
 
-            async def run_challenge(index: int, prob: dict) -> tuple[float, object | None, str]:
+            async def poll_problems_json_loop() -> None:
+                """Every ~10s, refetch problems; if a running id appears in solved[], stop that swarm only."""
+                while not poll_shutdown.is_set():
+                    try:
+                        await asyncio.wait_for(poll_shutdown.wait(), timeout=10.0)
+                        return
+                    except TimeoutError:
+                        pass
+                    try:
+                        data = await fetch_problems_json(client, base_url, cookie)
+                        solved_now = solved_ids_from_payload(data)
+                        for pid in list(running_swarms.keys()):
+                            if pid in solved_now:
+                                sw = running_swarms.get(pid)
+                                if sw is not None:
+                                    logger.info(
+                                        "MetaCTF poll: id=%s now in solved[] — stopping this swarm only",
+                                        pid,
+                                    )
+                                    console.print(
+                                        f"[yellow]Poll: id={pid} now solved on server — "
+                                        f"stopping its containers (other challenges keep running)[/yellow]"
+                                    )
+                                    sw.kill()
+                    except Exception as e:
+                        logger.warning("MetaCTF problems_json poll: %s", e)
+
+            async def run_challenge(index: int, prob: dict) -> tuple[float, object | None, str, int]:
                 async with sem:
                     title = str(prob.get("title") or "?")
                     pid = int(prob.get("id") or 0)
@@ -227,13 +259,23 @@ async def _run_metactf(
                         metactf_http=client,
                     )
 
-                    result = await swarm.run()
-                    return cost_tracker.total_cost_usd, result, title
+                    running_swarms[pid] = swarm
+                    try:
+                        result = await swarm.run()
+                    finally:
+                        running_swarms.pop(pid, None)
+
+                    status = getattr(result, "status", None) if result else None
+                    console.print(
+                        f"[dim]Challenge task done: id={pid} {title!r} status={status}[/dim]"
+                    )
+                    return cost_tracker.total_cost_usd, result, title, pid
 
             tasks = [
                 asyncio.create_task(run_challenge(i, prob), name=f"metactf-{prob.get('id')}")
                 for i, prob in enumerate(selected, 1)
             ]
+            poll_task = asyncio.create_task(poll_problems_json_loop(), name="metactf-poll-problems")
 
             try:
                 outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -243,12 +285,17 @@ async def _run_metactf(
                 await asyncio.gather(*tasks, return_exceptions=True)
                 console.print("\n[yellow]Interrupted — cancelling challenges.[/yellow]")
                 raise
+            finally:
+                poll_shutdown.set()
+                poll_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await poll_task
 
             for item in outcomes:
                 if isinstance(item, Exception):
                     console.print(f"[red]Challenge task failed: {item}[/red]")
                     continue
-                cst, result, title = item
+                cst, result, title, _pid = item
                 total_cost += cst
                 if result and getattr(result, "status", None) == FLAG_FOUND:
                     console.print(f"  [green]Solved[/green] {title!r} — {getattr(result, 'flag', None)}")

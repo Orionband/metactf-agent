@@ -1,4 +1,4 @@
-"""CLI — fetch MetaCTF Compete problems, solve sequentially with tiered models, submit flags."""
+"""CLI — fetch MetaCTF Compete problems, solve in parallel (tiered models), submit flags."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from backend.metactf import (
     problem_to_challenge_files,
     select_problems,
     slug_challenge_dir,
+    solved_ids_from_payload,
 )
 from backend.models import DEFAULT_MODELS
 from backend.prompts import ChallengeMeta
@@ -144,6 +145,7 @@ async def _run_metactf(
     console.print(f"  OpenRouter keys: {len(openrouter_keys)}")
     console.print(f"  Gemini keys: {len(gemini_keys)}")
     console.print(f"  Submit: {'no (dry)' if no_submit else 'yes'}")
+    console.print(f"  Parallel challenges (max): {settings.max_concurrent_challenges}")
     console.print()
 
     work_parent = Path(tempfile.mkdtemp(prefix="metactf_agent_"))
@@ -156,7 +158,14 @@ async def _run_metactf(
             headers={"User-Agent": USER_AGENT},
         ) as client:
             payload = await fetch_problems_json(client, base_url, cookie)
+            solved_ids = solved_ids_from_payload(payload)
             selected = select_problems(payload, limit=eff_limit, skip_titles=skip_titles)
+
+            console.print(
+                f"  API `solved` ids excluded: {len(solved_ids)} — "
+                f"to run: {len(selected)} unsolved challenge(s)"
+            )
+            console.print()
 
             if not selected:
                 console.print("[yellow]No unsolved challenges matched your filters.[/yellow]")
@@ -167,56 +176,84 @@ async def _run_metactf(
                 console.print("[red]Challenges over 200 points need GEMINI_API_KEY / GEMINI_API_KEYS.[/red]")
                 sys.exit(1)
 
+            max_models = 1
+            for p in selected:
+                pts = int(p.get("points") or 0)
+                n = len(model_specs_for_points(pts, default_three=list(DEFAULT_MODELS), qwen_spec=QWEN_SPEC))
+                max_models = max(max_models, n)
+            configure_semaphore(settings.max_concurrent_challenges * max_models)
+
             await cleanup_orphan_containers()
 
-            for i, prob in enumerate(selected, 1):
-                title = str(prob.get("title") or "?")
-                pid = int(prob.get("id") or 0)
-                pts = int(prob.get("points") or 0)
-                specs = model_specs_for_points(pts, default_three=list(DEFAULT_MODELS), qwen_spec=QWEN_SPEC)
+            sem = asyncio.Semaphore(settings.max_concurrent_challenges)
 
-                if pts > 200:
-                    st = settings.model_copy(
-                        update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+            async def run_challenge(index: int, prob: dict) -> tuple[float, object | None, str]:
+                async with sem:
+                    title = str(prob.get("title") or "?")
+                    pid = int(prob.get("id") or 0)
+                    pts = int(prob.get("points") or 0)
+                    specs = model_specs_for_points(
+                        pts, default_three=list(DEFAULT_MODELS), qwen_spec=QWEN_SPEC
                     )
-                else:
-                    st = settings.model_copy(update={"gemini_rotate_chain": ""})
 
-                configure_semaphore(st.max_concurrent_challenges * max(1, len(specs)))
+                    if pts > 200:
+                        st = settings.model_copy(
+                            update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+                        )
+                    else:
+                        st = settings.model_copy(update={"gemini_rotate_chain": ""})
 
-                slug = slug_challenge_dir(title)
-                ch_dir = str(work_parent / f"{i:02d}_{slug}")
-                problem_to_challenge_files(prob, ch_dir)
-                meta = ChallengeMeta.from_directory(ch_dir)
+                    slug = slug_challenge_dir(title)
+                    ch_dir = str(work_parent / f"id{pid}_{slug}")
+                    problem_to_challenge_files(prob, ch_dir)
+                    meta = ChallengeMeta.from_directory(ch_dir)
 
-                console.print(f"[bold]({i}/{len(selected)})[/bold] {title} — {pts} pts — models: {len(specs)}")
+                    console.print(
+                        f"[bold][{index}/{len(selected)}][/bold] start {title!r} "
+                        f"(id={pid}, {pts} pts, {len(specs)} model lane(s))"
+                    )
 
-                cost_tracker = CostTracker()
-                swarm = MetaCTFChallengeSwarm(
-                    challenge_dir=ch_dir,
-                    meta=meta,
-                    cost_tracker=cost_tracker,
-                    settings=st,
-                    model_specs=specs,
-                    no_submit=no_submit,
-                    metactf_base_url=base_url,
-                    metactf_cookie=cookie,
-                    metactf_problem_id=pid,
-                    metactf_http=client,
-                )
+                    cost_tracker = CostTracker()
+                    swarm = MetaCTFChallengeSwarm(
+                        challenge_dir=ch_dir,
+                        meta=meta,
+                        cost_tracker=cost_tracker,
+                        settings=st,
+                        model_specs=specs,
+                        no_submit=no_submit,
+                        metactf_base_url=base_url,
+                        metactf_cookie=cookie,
+                        metactf_problem_id=pid,
+                        metactf_http=client,
+                    )
 
-                try:
                     result = await swarm.run()
-                except (KeyboardInterrupt, asyncio.CancelledError):
-                    console.print("\n[yellow]Interrupted — stopping.[/yellow]")
-                    swarm.kill()
-                    raise
+                    return cost_tracker.total_cost_usd, result, title
 
-                total_cost += cost_tracker.total_cost_usd
-                if result and result.status == FLAG_FOUND:
-                    console.print(f"  [green]Solved[/green] — {result.flag}")
+            tasks = [
+                asyncio.create_task(run_challenge(i, prob), name=f"metactf-{prob.get('id')}")
+                for i, prob in enumerate(selected, 1)
+            ]
+
+            try:
+                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                for t in tasks:
+                    t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                console.print("\n[yellow]Interrupted — cancelling challenges.[/yellow]")
+                raise
+
+            for item in outcomes:
+                if isinstance(item, Exception):
+                    console.print(f"[red]Challenge task failed: {item}[/red]")
+                    continue
+                cst, result, title = item
+                total_cost += cst
+                if result and getattr(result, "status", None) == FLAG_FOUND:
+                    console.print(f"  [green]Solved[/green] {title!r} — {getattr(result, 'flag', None)}")
                 else:
-                    console.print("  [yellow]Not solved this round[/yellow]")
+                    console.print(f"  [yellow]Not solved[/yellow] {title!r}")
 
         console.print(f"\n[bold]Total API cost (estimated):[/bold] ${total_cost:.4f}")
     finally:

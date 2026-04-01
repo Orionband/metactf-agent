@@ -165,19 +165,33 @@ async def submit_flag(
     return MetaSubmitResult(ok=False, display=combined or str(data), attempts_left=attempts)
 
 
+def solved_ids_from_payload(payload: dict[str, Any]) -> set[int]:
+    """IDs from API `solved` (e.g. [147, 55, 77, ...]) as ints for matching each problem `id`."""
+    out: set[int] = set()
+    for raw in payload.get("solved") or []:
+        try:
+            out.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def select_problems(
     payload: dict[str, Any],
     *,
     limit: int | None,
     skip_titles: set[str],
 ) -> list[dict[str, Any]]:
-    """Filter unsolved, skip titles, sort by points ascending then id."""
-    solved = set(payload.get("solved") or [])
+    """Exclude problems whose `id` is in `solved`, skip titles, sort by points then id."""
+    solved = solved_ids_from_payload(payload)
     rows: list[dict[str, Any]] = []
     for p in payload.get("problems") or []:
         if not isinstance(p, dict):
             continue
-        pid = p.get("id")
+        try:
+            pid = int(p.get("id"))
+        except (TypeError, ValueError):
+            continue
         if pid in solved:
             continue
         if not int(p.get("solvable") or 0):

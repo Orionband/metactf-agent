@@ -1,26 +1,20 @@
 # CTF Agent
 
-Autonomous CTF solver that runs OpenRouter models on whatever you put in a folder.
-
-
 ## Setup
 
 1. Install: 
 ```
-python3 -m venv .venv                                                                               
-source .venv/bin/activate
 pip install -e .
+ctf-metactf compete.metactf.com/576 --cookie "METACTF_COMPETE=your_token_here"
+# or full URL / env cookie
+set METACTF_COOKIE=METACTF_COMPETE=...
+ctf-metactf https://compete.metactf.com/576
+# limit (0 or omit = all unsolved, after sort)
+ctf-metactf compete.metactf.com/576 --cookie "..." --limit 4
+# skip titles (semicolons)
+ctf-metactf compete.metactf.com/576 --cookie "..." --skip "Dead Drop;Great Paywall"
+# long cookie with MCS_OPTIONS — only METACTF_* (etc.) is sent; MCS_OPTIONS stripped
 ```
-2. Build the Docker sandbox: `docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox .`
-3. Create a `.env` file with either one key or multiple keys:
-
-   ```env
-   # single-key mode
-   OPENROUTER_API_KEY=sk-or-v1-...
-
-   # multi-key mode (comma/newline separated)
-   OPENROUTER_API_KEYS=sk-or-v1-key1,sk-or-v1-key2,sk-or-v1-key3
-   ```
 
 When multiple keys are present, solver requests are distributed in round-robin order across keys.
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -37,6 +39,42 @@ def normalize_metactf_base_url(raw: str) -> str:
     return f"https://{host}/{path}"
 
 
+def _origin_and_referer(base_url: str) -> tuple[str, str]:
+    u = urlparse(base_url.rstrip("/"))
+    origin = f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else ""
+    referer = base_url.rstrip("/") + "/"
+    return origin, referer
+
+
+def _response_json_or_raise(resp: httpx.Response, *, what: str) -> dict[str, Any]:
+    """Parse JSON; raise RuntimeError with body snippet if not JSON (e.g. HTML login page)."""
+    raw = (resp.text or "").strip().lstrip("\ufeff")
+    if not raw:
+        raise RuntimeError(
+            f"MetaCTF {what}: empty response (HTTP {resp.status_code}). "
+            "Check cookie (METACTF_COMPETE=...) and contest URL."
+        )
+    ct = (resp.headers.get("content-type") or "").lower()
+    if "text/html" in ct and not raw.lstrip().startswith("{"):
+        snippet = re.sub(r"\s+", " ", raw)[:400]
+        raise RuntimeError(
+            f"MetaCTF {what}: got HTML instead of JSON (HTTP {resp.status_code}). "
+            "Usually invalid or expired cookie — log in again and copy the cookie. "
+            f"Body starts: {snippet!r}"
+        )
+    try:
+        out = json.loads(raw)
+    except json.JSONDecodeError as e:
+        snippet = raw[:500].replace("\n", " ")
+        raise RuntimeError(
+            f"MetaCTF {what}: not valid JSON (HTTP {resp.status_code}): {e}. "
+            f"Body starts: {snippet!r}"
+        ) from e
+    if not isinstance(out, dict):
+        raise RuntimeError(f"MetaCTF {what}: expected JSON object, got {type(out).__name__}")
+    return out
+
+
 def cookie_header_for_metactf(raw: str) -> str:
     """Drop MCS_OPTIONS=... segments (UI filters); keep session cookies only."""
     parts = [p.strip() for p in raw.split(";") if p.strip()]
@@ -59,18 +97,26 @@ def _parse_attempts_left(text: str) -> int | None:
 
 async def fetch_problems_json(client: httpx.AsyncClient, base_url: str, cookie: str) -> dict[str, Any]:
     url = f"{base_url.rstrip('/')}/api/problems_json.php"
+    clean = cookie_header_for_metactf(cookie)
+    if not clean.strip():
+        raise RuntimeError("MetaCTF: cookie is empty after stripping MCS_OPTIONS — set METACTF_COMPETE=...")
+    origin, referer = _origin_and_referer(base_url)
     resp = await client.get(
         url,
         headers={
-            "Cookie": cookie_header_for_metactf(cookie),
+            "Cookie": clean,
             "User-Agent": USER_AGENT,
             "Accept": "application/json, text/plain, */*",
+            "Referer": referer,
+            "Origin": origin,
+            "X-Requested-With": "XMLHttpRequest",
         },
     )
     resp.raise_for_status()
-    data = resp.json()
-    if data.get("error"):
-        raise RuntimeError(f"MetaCTF API error: {data!r}")
+    data = _response_json_or_raise(resp, what="problems_json")
+    err = data.get("error")
+    if err is True or (isinstance(err, str) and err):
+        raise RuntimeError(f"MetaCTF API error flag: {data!r}")
     return data
 
 
@@ -83,6 +129,7 @@ async def submit_flag(
 ) -> MetaSubmitResult:
     url = f"{base_url.rstrip('/')}/api/submit.php"
     clean = cookie_header_for_metactf(cookie)
+    origin, referer = _origin_and_referer(base_url)
     resp = await client.post(
         url,
         data={"id": str(problem_id), "answer": answer.strip()},
@@ -91,13 +138,16 @@ async def submit_flag(
             "User-Agent": USER_AGENT,
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json, text/plain, */*",
+            "Referer": referer,
+            "Origin": origin,
+            "X-Requested-With": "XMLHttpRequest",
         },
     )
     resp.raise_for_status()
     try:
-        data = resp.json()
-    except Exception as e:
-        return MetaSubmitResult(ok=False, display=f"MetaCTF submit: invalid JSON ({e}): {resp.text[:300]}", attempts_left=None)
+        data = _response_json_or_raise(resp, what="submit")
+    except RuntimeError as e:
+        return MetaSubmitResult(ok=False, display=str(e), attempts_left=None)
 
     status = str(data.get("status", "")).lower()
     mes = str(data.get("mes", "") or "")

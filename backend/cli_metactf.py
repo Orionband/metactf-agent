@@ -108,18 +108,22 @@ def main(
     skip_titles = {t.strip() for t in skip.split(";") if t.strip()}
     eff_limit = None if limit is None or limit <= 0 else limit
 
-    asyncio.run(
-        _run_metactf(
-            settings=settings,
-            base_url=base,
-            cookie=cookie_clean,
-            eff_limit=eff_limit,
-            skip_titles=skip_titles,
-            no_submit=no_submit,
-            openrouter_keys=openrouter_keys,
-            gemini_keys=gemini_keys,
+    try:
+        asyncio.run(
+            _run_metactf(
+                settings=settings,
+                base_url=base,
+                cookie=cookie_clean,
+                eff_limit=eff_limit,
+                skip_titles=skip_titles,
+                no_submit=no_submit,
+                openrouter_keys=openrouter_keys,
+                gemini_keys=gemini_keys,
+            )
         )
-    )
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
 
 
 async def _run_metactf(

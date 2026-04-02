@@ -47,7 +47,7 @@ def _setup_logging(verbose: bool = False) -> None:
     "--model",
     "single_model",
     default=None,
-    help="Run only one model (e.g. openrouter/qwen/qwen3.6-plus-preview:free).",
+    help="Run only one model (e.g. openrouter/qwen/qwen3.6-plus:free).",
 )
 @click.option(
     "--gemini",

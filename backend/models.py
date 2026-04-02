@@ -14,19 +14,19 @@ if TYPE_CHECKING:
 
 # Default model specs (provider is always openrouter)
 DEFAULT_MODELS: list[str] = [
-    "openrouter/qwen/qwen3.6-plus-preview:free",
+    "openrouter/qwen/qwen3.6-plus:free",
     "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "openrouter/stepfun/step-3.5-flash:free",
 ]
 
 CONTEXT_WINDOWS: dict[str, int] = {
-    "qwen/qwen3.6-plus-preview:free": 200_000,
+    "qwen/qwen3.6-plus:free": 200_000,
     "nvidia/nemotron-3-super-120b-a12b:free": 200_000,
     "stepfun/step-3.5-flash:free": 200_000,
 }
 
 VISION_MODELS: set[str] = {
-    "qwen/qwen3.6-plus-preview:free",
+    "qwen/qwen3.6-plus:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "stepfun/step-3.5-flash:free",
 }

@@ -36,7 +36,7 @@ from backend.solver_base import FLAG_FOUND
 console = Console()
 logger = logging.getLogger(__name__)
 
-QWEN_SPEC = "openrouter/qwen/qwen3.6-plus-preview:free"
+QWEN_SPEC = "openrouter/qwen/qwen3.6-plus:free"
 
 
 def _setup_logging(verbose: bool = False) -> None:

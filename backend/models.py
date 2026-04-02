@@ -19,16 +19,25 @@ DEFAULT_MODELS: list[str] = [
     "openrouter/stepfun/step-3.5-flash:free",
 ]
 
+FALLBACK_MODELS: list[str] = [
+    "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
+    "openrouter/openai/gpt-oss-120b:free",
+]
+
 CONTEXT_WINDOWS: dict[str, int] = {
     "qwen/qwen3.6-plus:free": 200_000,
     "nvidia/nemotron-3-super-120b-a12b:free": 200_000,
     "stepfun/step-3.5-flash:free": 200_000,
+    "qwen/qwen3-next-80b-a3b-instruct:free": 200_000,
+    "openai/gpt-oss-120b:free": 200_000,
 }
 
 VISION_MODELS: set[str] = {
     "qwen/qwen3.6-plus:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "stepfun/step-3.5-flash:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "openai/gpt-oss-120b:free",
 }
 
 

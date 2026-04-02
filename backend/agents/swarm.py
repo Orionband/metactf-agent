@@ -12,7 +12,7 @@ from backend.agents.gemini_solver import GeminiSolver
 from backend.agents.openrouter_solver import OpenRouterSolver
 from backend.cost_tracker import CostTracker
 from backend.message_bus import ChallengeMessageBus
-from backend.models import DEFAULT_MODELS
+from backend.models import DEFAULT_MODELS, FALLBACK_MODELS
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
     CANCELLED,
@@ -39,6 +39,7 @@ class ChallengeSwarm:
     cost_tracker: CostTracker
     settings: Settings
     model_specs: list[str] = field(default_factory=lambda: list(DEFAULT_MODELS))
+    fallback_model_specs: list[str] = field(default_factory=lambda: list(FALLBACK_MODELS))
     no_submit: bool = False
     coordinator_inbox: asyncio.Queue | None = None
 
@@ -52,6 +53,7 @@ class ChallengeSwarm:
     _submitted_flags: set[str] = field(default_factory=set)
     _last_submit_time: dict[str, float] = field(default_factory=dict)
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
+    _started_specs: set[str] = field(default_factory=set)
 
     def _create_solver(self, model_spec: str):
         if model_spec.startswith("gemini/"):
@@ -236,42 +238,80 @@ class ChallengeSwarm:
         return result, solver
 
     async def run(self) -> SolverResult | None:
-        tasks = [
-            asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}") for spec in self.model_specs
-        ]
+        task_to_spec: dict[asyncio.Task, str] = {}
+        fallback_queue = [s for s in self.fallback_model_specs if s not in self.model_specs]
+
+        def _launch_solver(spec: str) -> None:
+            if spec in self._started_specs:
+                return
+            self._started_specs.add(spec)
+            task = asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")
+            task_to_spec[task] = spec
+            logger.info("[%s] Solver lane started: %s", self.meta.name, spec)
+
+        for spec in self.model_specs:
+            _launch_solver(spec)
 
         try:
-            while tasks:
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            while task_to_spec:
+                done, pending = await asyncio.wait(
+                    set(task_to_spec.keys()), return_when=asyncio.FIRST_COMPLETED
+                )
 
                 for task in done:
+                    spec = task_to_spec.pop(task, "<unknown>")
                     try:
                         result = task.result()
                     except Exception:
-                        continue
+                        result = None
+                        logger.exception("[%s/%s] Solver lane crashed", self.meta.name, spec)
+
+                    if (
+                        not self.cancel_event.is_set()
+                        and fallback_queue
+                        and (
+                            result is None
+                            or result.status in (QUOTA_ERROR, ERROR, GAVE_UP)
+                        )
+                    ):
+                        next_spec = fallback_queue.pop(0)
+                        logger.info(
+                            "[%s] Launching fallback model %s after %s ended with %s",
+                            self.meta.name,
+                            next_spec,
+                            spec,
+                            getattr(result, "status", "crashed"),
+                        )
+                        _launch_solver(next_spec)
+
                     if result and result.status == FLAG_FOUND:
                         self.cancel_event.set()
                         for p in pending:
                             p.cancel()
                         await asyncio.gather(*pending, return_exceptions=True)
+                        for p in pending:
+                            task_to_spec.pop(p, None)
                         return result
 
-                tasks = list(pending)
+                # Remove tasks that were cancelled above (if any).
+                for p in list(task_to_spec.keys()):
+                    if p.done() and p not in done:
+                        task_to_spec.pop(p, None)
 
             self.cancel_event.set()
             return self.winner
         except (asyncio.CancelledError, KeyboardInterrupt):
             self.cancel_event.set()
-            for t in tasks:
+            for t in task_to_spec:
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*task_to_spec.keys(), return_exceptions=True)
             return self.winner
         except Exception as e:
             logger.error("[%s] Swarm error: %s", self.meta.name, e, exc_info=True)
             self.cancel_event.set()
-            for t in tasks:
+            for t in task_to_spec:
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*task_to_spec.keys(), return_exceptions=True)
             return None
 
     def kill(self) -> None:
@@ -287,10 +327,10 @@ class ChallengeSwarm:
                     "findings": self.findings.get(spec, ""),
                     "status": (
                         "running"
-                        if spec in self.solvers and not self.cancel_event.is_set()
+                        if spec in self._started_specs and not self.cancel_event.is_set()
                         else ("won" if self.winner and self.winner.flag else "finished")
                     ),
                 }
-                for spec in self.model_specs
+                for spec in sorted(self._started_specs)
             },
         }

@@ -87,6 +87,16 @@ def provider_from_spec(spec: str) -> str:
     return spec.split("/", 1)[0]
 
 
+def openrouter_spec_from_user_id(user: str) -> str:
+    """Normalize CLI input like ``qwen/qwen3.7-plus:free`` to ``openrouter/qwen/...``."""
+    t = (user or "").strip()
+    if not t:
+        raise ValueError("empty OpenRouter model id")
+    if t.startswith("openrouter/"):
+        return t
+    return f"openrouter/{t}"
+
+
 def effort_from_spec(spec: str) -> str | None:
     """Unused for OpenRouter defaults; kept for API compatibility."""
     return None

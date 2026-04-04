@@ -21,6 +21,7 @@ from backend.metactf import (
     USER_AGENT,
     cookie_header_for_metactf,
     fetch_problems_json,
+    is_instance_based_remote_challenge,
     model_specs_for_points,
     normalize_metactf_base_url,
     problem_to_challenge_files,
@@ -28,7 +29,7 @@ from backend.metactf import (
     slug_challenge_dir,
     solved_ids_from_payload,
 )
-from backend.models import DEFAULT_MODELS
+from backend.models import DEFAULT_MODELS, openrouter_spec_from_user_id
 from backend.prompts import ChallengeMeta
 from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 from backend.solver_base import FLAG_FOUND
@@ -68,6 +69,12 @@ def _setup_logging(verbose: bool = False) -> None:
     help="Challenge titles to skip, separated by semicolons (e.g. 'Dead Drop;License To Rev').",
 )
 @click.option("--no-submit", is_flag=True, help="Dry run - do not POST flags to MetaCTF.")
+@click.option(
+    "--custom",
+    "custom_openrouter",
+    default=None,
+    help="OpenRouter model id for the Qwen slot and first lane of multi-model tiers (e.g. qwen/qwen3.7-plus:free).",
+)
 @click.option("-v", "--verbose", is_flag=True)
 def main(
     contest_url: str,
@@ -75,6 +82,7 @@ def main(
     limit: int | None,
     skip: str,
     no_submit: bool,
+    custom_openrouter: str | None,
     verbose: bool,
 ) -> None:
     """Solve MetaCTF Compete problems using tiered models and API submission.
@@ -111,6 +119,14 @@ def main(
     skip_titles = {t.strip() for t in skip.split(";") if t.strip()}
     eff_limit = None if limit is None or limit <= 0 else limit
 
+    custom_spec: str | None = None
+    if custom_openrouter:
+        try:
+            custom_spec = openrouter_spec_from_user_id(custom_openrouter)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
+
     try:
         asyncio.run(
             _run_metactf(
@@ -122,6 +138,7 @@ def main(
                 no_submit=no_submit,
                 openrouter_keys=openrouter_keys,
                 gemini_keys=gemini_keys,
+                custom_openrouter_spec=custom_spec,
             )
         )
     except RuntimeError as e:
@@ -139,7 +156,13 @@ async def _run_metactf(
     no_submit: bool,
     openrouter_keys: list[str],
     gemini_keys: list[str],
+    custom_openrouter_spec: str | None = None,
 ) -> None:
+    tier_default_three = (
+        [custom_openrouter_spec] + list(DEFAULT_MODELS[1:]) if custom_openrouter_spec else list(DEFAULT_MODELS)
+    )
+    qwen_effective = custom_openrouter_spec if custom_openrouter_spec else QWEN_SPEC
+
     console.print("[bold]MetaCTF agent[/bold]")
     console.print(f"  Contest: {base_url}")
     console.print(f"  Skip: {skip_titles or '(none)'}")
@@ -148,6 +171,8 @@ async def _run_metactf(
     console.print(f"  Gemini keys: {len(gemini_keys)}")
     console.print(f"  Submit: {'no (dry)' if no_submit else 'yes'}")
     console.print(f"  Parallel challenges (max): {settings.max_concurrent_challenges}")
+    if custom_openrouter_spec:
+        console.print(f"  Custom OpenRouter (Qwen / first lane): {custom_openrouter_spec}")
     console.print()
 
     work_parent = Path(tempfile.mkdtemp(prefix="metactf_agent_"))
@@ -181,7 +206,11 @@ async def _run_metactf(
             max_models = 1
             for p in selected:
                 pts = int(p.get("points") or 0)
-                n = len(model_specs_for_points(pts, default_three=list(DEFAULT_MODELS), qwen_spec=QWEN_SPEC))
+                n = len(
+                    model_specs_for_points(
+                        pts, default_three=tier_default_three, qwen_spec=qwen_effective
+                    )
+                )
                 max_models = max(max_models, n)
             configure_semaphore(settings.max_concurrent_challenges * max_models)
 
@@ -225,7 +254,7 @@ async def _run_metactf(
                     pid = int(prob.get("id") or 0)
                     pts = int(prob.get("points") or 0)
                     specs = model_specs_for_points(
-                        pts, default_three=list(DEFAULT_MODELS), qwen_spec=QWEN_SPEC
+                        pts, default_three=tier_default_three, qwen_spec=qwen_effective
                     )
 
                     if pts > 200:
@@ -237,8 +266,28 @@ async def _run_metactf(
 
                     slug = slug_challenge_dir(title)
                     ch_dir = str(work_parent / f"id{pid}_{slug}")
+                    html_raw = str(prob.get("description") or "")
                     problem_to_challenge_files(prob, ch_dir)
                     meta = ChallengeMeta.from_directory(ch_dir)
+                    if is_instance_based_remote_challenge(html_raw, meta.description):
+                        console.print(
+                            f"[yellow]Instance-based challenge[/yellow] — {title!r} "
+                            "expects a target you spawn (e.g. Kubernetes / remote instance)."
+                        )
+                        url = click.prompt(
+                            f"Spawn the container for challenge {title!r}, then paste the full challenge URL",
+                            default="",
+                            show_default=False,
+                        ).strip()
+                        if url:
+                            Path(ch_dir).joinpath("connection.txt").write_text(
+                                url + "\n", encoding="utf-8"
+                            )
+                            meta = ChallengeMeta.from_directory(ch_dir)
+                        else:
+                            console.print(
+                                f"[dim]No URL saved for {title!r}; solvers may miss the live target.[/dim]"
+                            )
 
                     console.print(
                         f"[bold][{index}/{len(selected)}][/bold] start {title!r} "
@@ -257,6 +306,7 @@ async def _run_metactf(
                         metactf_cookie=cookie,
                         metactf_problem_id=pid,
                         metactf_http=client,
+                        slow_solve_alert=lambda m: console.print(f"[yellow]{m}[/yellow]"),
                     )
 
                     running_swarms[pid] = swarm

@@ -13,7 +13,7 @@ import httpx
 from rich.console import Console
 
 from backend.config import Settings
-from backend.models import DEFAULT_MODELS, model_id_from_spec
+from backend.models import DEFAULT_MODELS, model_id_from_spec, openrouter_spec_from_user_id
 
 console = Console()
 
@@ -50,6 +50,12 @@ def _setup_logging(verbose: bool = False) -> None:
     help="Run only one model (e.g. openrouter/qwen/qwen3.6-plus:free).",
 )
 @click.option(
+    "--custom",
+    "custom_openrouter",
+    default=None,
+    help="OpenRouter model id (e.g. qwen/qwen3.7-plus:free). Same as --model with openrouter/ implied.",
+)
+@click.option(
     "--gemini",
     "include_gemini",
     is_flag=True,
@@ -76,6 +82,7 @@ def main(
     challenge_dir: Path | None,
     watch_dir: Path | None,
     single_model: str | None,
+    custom_openrouter: str | None,
     include_gemini: bool,
     gemini_rotate: bool,
     check_keys: bool,
@@ -99,6 +106,16 @@ def main(
         ctf-solve --watch ./challenges
     """
     _setup_logging(verbose)
+
+    if custom_openrouter and single_model:
+        console.print("[red]Use either --custom or --model, not both.[/red]")
+        sys.exit(1)
+    if custom_openrouter:
+        try:
+            single_model = openrouter_spec_from_user_id(custom_openrouter)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            sys.exit(1)
 
     settings = Settings()
     gemini_rotate_with_defaults = False
@@ -288,10 +305,6 @@ async def _run_single(
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
-    # In one-model mode, always show model/tool debug output by default.
-    if len(model_specs) == 1:
-        settings = settings.model_copy(update={"always_debug_single_model": True})
-
     max_concurrent = settings.max_concurrent_challenges
     configure_semaphore(max_concurrent * len(model_specs))
     await cleanup_orphan_containers()
@@ -312,6 +325,7 @@ async def _run_single(
         settings=settings,
         model_specs=model_specs,
         no_submit=no_submit,
+        slow_solve_alert=lambda m: console.print(f"[yellow]{m}[/yellow]"),
     )
 
     try:

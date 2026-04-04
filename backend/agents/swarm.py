@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+import contextlib
 from typing import TYPE_CHECKING
 
 from backend.agents.gemini_solver import GeminiSolver
@@ -54,6 +56,8 @@ class ChallengeSwarm:
     _last_submit_time: dict[str, float] = field(default_factory=dict)
     message_bus: ChallengeMessageBus = field(default_factory=ChallengeMessageBus)
     _started_specs: set[str] = field(default_factory=set)
+    slow_solve_seconds: float = 45.0
+    slow_solve_alert: Callable[[str], None] | None = None
 
     def _create_solver(self, model_spec: str):
         if model_spec.startswith("gemini/"):
@@ -252,6 +256,26 @@ class ChallengeSwarm:
         for spec in self.model_specs:
             _launch_solver(spec)
 
+        slow_alert_task: asyncio.Task[None] | None = None
+        if self.slow_solve_seconds and self.slow_solve_seconds > 0:
+
+            async def _slow_solve_notice() -> None:
+                await asyncio.sleep(float(self.slow_solve_seconds))
+                if self.cancel_event.is_set():
+                    return
+                if self.winner is not None:
+                    return
+                msg = (
+                    f"Challenge {self.meta.name!r} has not been solved yet after "
+                    f"{self.slow_solve_seconds:.0f} seconds (solvers still running)."
+                )
+                if self.slow_solve_alert:
+                    self.slow_solve_alert(msg)
+                else:
+                    logger.warning(msg)
+
+            slow_alert_task = asyncio.create_task(_slow_solve_notice())
+
         try:
             while task_to_spec:
                 done, pending = await asyncio.wait(
@@ -313,6 +337,11 @@ class ChallengeSwarm:
                 t.cancel()
             await asyncio.gather(*task_to_spec.keys(), return_exceptions=True)
             return None
+        finally:
+            if slow_alert_task is not None:
+                slow_alert_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await slow_alert_task
 
     def kill(self) -> None:
         self.cancel_event.set()

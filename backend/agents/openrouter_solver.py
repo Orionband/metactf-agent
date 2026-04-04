@@ -556,13 +556,6 @@ class OpenRouterSolver:
             if debug_enabled:
                 print("\n" + "=" * 80)
                 print(f"[DEBUG {self.model_id}] assistant_content:\n{assistant_content[:1500]}")
-                if tool_calls:
-                    print(
-                        f"[DEBUG {self.model_id}] tool_calls:\n"
-                        f"{json.dumps(tool_calls, ensure_ascii=False)[:2000]}"
-                    )
-                else:
-                    print(f"[DEBUG {self.model_id}] tool_calls: none")
                 print("=" * 80)
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": assistant_content}
@@ -599,24 +592,9 @@ class OpenRouterSolver:
                     tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                 except Exception:
                     tool_args = {}
-                args_preview = str(tool_args)[:300]
-                logger.info(
-                    "[%s] Tool call requested: step=%s id=%s tool=%s args=%s",
-                    self.agent_name,
-                    self._step_count,
-                    tool_call_id or "-",
-                    tool_name,
-                    args_preview,
-                )
 
                 if tool_name not in self._tool_defs:
                     tool_result = f"Unknown tool requested: {tool_name}"
-                    logger.warning(
-                        "[%s] Tool call rejected: unknown tool=%s step=%s",
-                        self.agent_name,
-                        tool_name,
-                        self._step_count,
-                    )
                 else:
                     self.tracer.tool_call(tool_name, tool_args, self._step_count)
 
@@ -624,39 +602,16 @@ class OpenRouterSolver:
                     if loop_status == "break":
                         self.tracer.event("loop_break", tool=tool_name, step=self._step_count)
                         tool_result = LOOP_WARNING_MESSAGE
-                        logger.warning(
-                            "[%s] Tool call blocked by loop detector: tool=%s step=%s",
-                            self.agent_name,
-                            tool_name,
-                            self._step_count,
-                        )
                     else:
-                        logger.debug(
-                            "[%s] Tool execution started: tool=%s step=%s",
-                            self.agent_name,
-                            tool_name,
-                            self._step_count,
-                        )
                         try:
                             tool_result = await self._tool_defs[tool_name].handler(**tool_args)
                         except Exception as e:
                             tool_result = f"Tool error ({tool_name}): {e}"
-                            logger.exception(
-                                "[%s] Tool execution error: tool=%s step=%s",
-                                self.agent_name,
-                                tool_name,
-                                self._step_count,
-                            )
+                            logger.exception("[%s] Tool error: %s", self.agent_name, tool_name)
 
                     tool_result = str(tool_result)
                     if loop_status == "warn":
                         tool_result = f"{tool_result}\n\n{LOOP_WARNING_MESSAGE}"
-                        logger.warning(
-                            "[%s] Tool call loop warning: tool=%s step=%s",
-                            self.agent_name,
-                            tool_name,
-                            self._step_count,
-                        )
 
                     # Auto-inject sibling findings every 5 tool calls
                     if (
@@ -671,17 +626,6 @@ class OpenRouterSolver:
                             self.tracer.event("findings_injected", step=self._step_count)
 
                     self.tracer.tool_result(tool_name, tool_result, self._step_count)
-                    logger.info(
-                        "[%s] Tool call completed: step=%s id=%s tool=%s result_chars=%s",
-                        self.agent_name,
-                        self._step_count,
-                        tool_call_id or "-",
-                        tool_name,
-                        len(tool_result),
-                    )
-
-                    if debug_enabled:
-                        print(f"[DEBUG {self.model_id}] tool_result {tool_name}: {tool_result[:1200]}")
 
                     # Flag confirmation detection
                     if tool_name == "submit_flag" and any(m in tool_result for m in CORRECT_MARKERS):

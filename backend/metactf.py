@@ -207,6 +207,21 @@ def select_problems(
     return rows
 
 
+def is_instance_based_remote_challenge(html: str, markdown_text: str) -> bool:
+    """True if the challenge needs a user-spawned remote instance (Kubes, loading placeholder, etc.)."""
+    h = html or ""
+    t = markdown_text or ""
+    blob = h + "\n" + t
+    blob_lower = blob.lower()
+    if re.search(r"loading\s*\.\.\.", blob_lower):
+        return True
+    if "kubes" in blob_lower:
+        return True
+    if '<div id="' in h or "<div id='" in h.lower():
+        return True
+    return False
+
+
 def slug_challenge_dir(title: str) -> str:
     raw = re.sub(r"[^\w\s\-]+", "", title, flags=re.UNICODE).strip()[:80]
     raw = re.sub(r"\s+", "_", raw).strip("_")

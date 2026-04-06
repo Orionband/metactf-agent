@@ -260,9 +260,9 @@ def problem_to_challenge_files(problem: dict[str, Any], dest_dir: str) -> None:
 
 
 def model_specs_for_points(points: int, *, default_three: list[str], qwen_spec: str) -> list[str]:
-    """<=150: Qwen only; 151–200: three OpenRouter; >200: three + Gemini (rotate via settings)."""
+    """<=150: Qwen + GPT-OSS; 151–200: three OpenRouter; >200: three + Gemini (rotate via settings)."""
     if points <= 150:
-        return [qwen_spec]
+        return [qwen_spec, "openrouter/openai/gpt-oss-120b:free"]
     if points <= 200:
         return list(default_three)
     return list(default_three) + ["gemini/gemini-3-flash-preview"]

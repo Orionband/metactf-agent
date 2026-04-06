@@ -38,6 +38,8 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 QWEN_SPEC = "openrouter/qwen/qwen3.6-plus:free"
+# MetaCTF: never run more than this many challenges at once (batches run one after another).
+METACTF_PARALLEL_CHALLENGES = 2
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -89,9 +91,10 @@ def main(
 
     CONTEST_URL may be compete.metactf.com/576 or full https URL.
 
-    Points tiers: <=150 Qwen only; 151-200 three OpenRouter models; >200 three + Gemini rotate.
+    Points tiers: <=150 Qwen + GPT-OSS; 151-200 three OpenRouter models; >200 three + Gemini rotate.
 
     Requires OPENROUTER_API_KEY; for >200 pt challenges, GEMINI_API_KEY must be set.
+    For <=150 pt challenges, GEMINI_API_KEY is optional: without it, no Gemini lane is added after 45s.
     """
     _setup_logging(verbose)
 
@@ -170,7 +173,7 @@ async def _run_metactf(
     console.print(f"  OpenRouter keys: {len(openrouter_keys)}")
     console.print(f"  Gemini keys: {len(gemini_keys)}")
     console.print(f"  Submit: {'no (dry)' if no_submit else 'yes'}")
-    console.print(f"  Parallel challenges (max): {settings.max_concurrent_challenges}")
+    console.print(f"  Parallel challenges (max): {METACTF_PARALLEL_CHALLENGES} (batched)")
     if custom_openrouter_spec:
         console.print(f"  Custom OpenRouter (Qwen / first lane): {custom_openrouter_spec}")
     console.print()
@@ -203,6 +206,11 @@ async def _run_metactf(
                 console.print("[red]Challenges over 200 points need GEMINI_API_KEY / GEMINI_API_KEYS.[/red]")
                 sys.exit(1)
 
+            if any(int(p.get("points") or 0) <= 150 for p in selected) and not gemini_keys:
+                console.print(
+                    "[yellow]No GEMINI keys: <=150 pt challenges will not add Gemini after 45s without a solve.[/yellow]"
+                )
+
             max_models = 1
             for p in selected:
                 pts = int(p.get("points") or 0)
@@ -212,11 +220,14 @@ async def _run_metactf(
                     )
                 )
                 max_models = max(max_models, n)
-            configure_semaphore(settings.max_concurrent_challenges * max_models)
+            if any(int(p.get("points") or 0) <= 150 for p in selected) and gemini_keys:
+                max_models += 1
+            configure_semaphore(METACTF_PARALLEL_CHALLENGES * max_models)
 
             await cleanup_orphan_containers()
 
-            sem = asyncio.Semaphore(settings.max_concurrent_challenges)
+            parallel_lock = asyncio.Lock()
+            active_parallel: list[tuple[int, str, MetaCTFChallengeSwarm]] = []
             # Swarms still running (for poll: stop if API marks id solved elsewhere)
             running_swarms: dict[int, MetaCTFChallengeSwarm] = {}
             poll_shutdown = asyncio.Event()
@@ -248,91 +259,146 @@ async def _run_metactf(
                     except Exception as e:
                         logger.warning("MetaCTF problems_json poll: %s", e)
 
-            async def run_challenge(index: int, prob: dict) -> tuple[float, object | None, str, int]:
-                async with sem:
-                    title = str(prob.get("title") or "?")
-                    pid = int(prob.get("id") or 0)
-                    pts = int(prob.get("points") or 0)
-                    specs = model_specs_for_points(
-                        pts, default_three=tier_default_three, qwen_spec=qwen_effective
-                    )
-
-                    if pts > 200:
-                        st = settings.model_copy(
-                            update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
-                        )
-                    else:
-                        st = settings.model_copy(update={"gemini_rotate_chain": ""})
-
-                    slug = slug_challenge_dir(title)
-                    ch_dir = str(work_parent / f"id{pid}_{slug}")
-                    html_raw = str(prob.get("description") or "")
-                    problem_to_challenge_files(prob, ch_dir)
-                    meta = ChallengeMeta.from_directory(ch_dir)
-                    if is_instance_based_remote_challenge(html_raw, meta.description):
+            async def stdin_skip_loop() -> None:
+                loop = asyncio.get_running_loop()
+                while True:
+                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                    if not line:
+                        break
+                    if line.strip().lower() != "skip":
+                        continue
+                    async with parallel_lock:
+                        pairs = list(active_parallel)
+                    if not pairs:
                         console.print(
-                            f"[yellow]Instance-based challenge[/yellow] — {title!r} "
-                            "expects a target you spawn (e.g. Kubernetes / remote instance)."
+                            "[yellow]No parallel challenges running — type 'skip' while a batch is active.[/yellow]"
                         )
-                        url = click.prompt(
-                            f"Spawn the container for challenge {title!r}, then paste the full challenge URL",
-                            default="",
-                            show_default=False,
-                        ).strip()
-                        if url:
-                            Path(ch_dir).joinpath("connection.txt").write_text(
-                                url + "\n", encoding="utf-8"
-                            )
-                            meta = ChallengeMeta.from_directory(ch_dir)
-                        else:
-                            console.print(
-                                f"[dim]No URL saved for {title!r}; solvers may miss the live target.[/dim]"
-                            )
+                        continue
 
+                    def _prompt() -> int:
+                        for i, (pid, title, _) in enumerate(pairs, 1):
+                            console.print(f"  {i}. id={pid} {title!r}")
+                        return click.prompt(
+                            f"Skip which challenge (1–{len(pairs)})?",
+                            type=click.IntRange(1, len(pairs)),
+                        )
+
+                    choice = await asyncio.to_thread(_prompt)
+                    _, _, swarm = pairs[choice - 1]
+                    swarm.kill()
+                    console.print("[yellow]Skip requested — stopping that challenge.[/yellow]")
+
+            async def run_challenge(index: int, prob: dict) -> tuple[float, object | None, str, int]:
+                title = str(prob.get("title") or "?")
+                pid = int(prob.get("id") or 0)
+                pts = int(prob.get("points") or 0)
+                specs = model_specs_for_points(
+                    pts, default_three=tier_default_three, qwen_spec=qwen_effective
+                )
+
+                if pts > 200:
+                    st = settings.model_copy(
+                        update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+                    )
+                else:
+                    st = settings.model_copy(update={"gemini_rotate_chain": ""})
+
+                slow_escalate_specs: list[str] = []
+                slow_escalate_st: Settings | None = None
+                if pts <= 150 and gemini_keys:
+                    slow_escalate_specs = ["gemini/gemini-3-flash-preview"]
+                    slow_escalate_st = st.model_copy(
+                        update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+                    )
+
+                slug = slug_challenge_dir(title)
+                ch_dir = str(work_parent / f"id{pid}_{slug}")
+                html_raw = str(prob.get("description") or "")
+                problem_to_challenge_files(prob, ch_dir)
+                meta = ChallengeMeta.from_directory(ch_dir)
+                if is_instance_based_remote_challenge(html_raw, meta.description):
                     console.print(
-                        f"[bold][{index}/{len(selected)}][/bold] start {title!r} "
-                        f"(id={pid}, {pts} pts, {len(specs)} model lane(s))"
+                        f"[yellow]Instance-based challenge[/yellow] — {title!r} "
+                        "expects a target you spawn (e.g. Kubernetes / remote instance)."
                     )
+                    url = click.prompt(
+                        f"Spawn the container for challenge {title!r}, then paste the full challenge URL",
+                        default="",
+                        show_default=False,
+                    ).strip()
+                    if url:
+                        Path(ch_dir).joinpath("connection.txt").write_text(
+                            url + "\n", encoding="utf-8"
+                        )
+                        meta = ChallengeMeta.from_directory(ch_dir)
+                    else:
+                        console.print(
+                            f"[dim]No URL saved for {title!r}; solvers may miss the live target.[/dim]"
+                        )
 
-                    cost_tracker = CostTracker()
-                    swarm = MetaCTFChallengeSwarm(
-                        challenge_dir=ch_dir,
-                        meta=meta,
-                        cost_tracker=cost_tracker,
-                        settings=st,
-                        model_specs=specs,
-                        no_submit=no_submit,
-                        metactf_base_url=base_url,
-                        metactf_cookie=cookie,
-                        metactf_problem_id=pid,
-                        metactf_http=client,
-                        slow_solve_alert=lambda m: console.print(f"[yellow]{m}[/yellow]"),
-                    )
+                console.print(
+                    f"[bold][{index}/{len(selected)}][/bold] start {title!r} "
+                    f"(id={pid}, {pts} pts, {len(specs)} model lane(s))"
+                )
 
-                    running_swarms[pid] = swarm
-                    try:
-                        result = await swarm.run()
-                    finally:
-                        running_swarms.pop(pid, None)
+                cost_tracker = CostTracker()
+                swarm = MetaCTFChallengeSwarm(
+                    challenge_dir=ch_dir,
+                    meta=meta,
+                    cost_tracker=cost_tracker,
+                    settings=st,
+                    model_specs=specs,
+                    no_submit=no_submit,
+                    metactf_base_url=base_url,
+                    metactf_cookie=cookie,
+                    metactf_problem_id=pid,
+                    metactf_http=client,
+                    slow_solve_alert=lambda m: console.print(f"[yellow]{m}[/yellow]"),
+                    slow_solve_escalate_specs=slow_escalate_specs,
+                    slow_solve_escalate_settings=slow_escalate_st if slow_escalate_specs else None,
+                )
 
-                    status = getattr(result, "status", None) if result else None
-                    console.print(
-                        f"[dim]Challenge task done: id={pid} {title!r} status={status}[/dim]"
-                    )
-                    return cost_tracker.total_cost_usd, result, title, pid
+                running_swarms[pid] = swarm
+                async with parallel_lock:
+                    active_parallel.append((pid, title, swarm))
+                try:
+                    result = await swarm.run()
+                finally:
+                    running_swarms.pop(pid, None)
+                    async with parallel_lock:
+                        try:
+                            active_parallel.remove((pid, title, swarm))
+                        except ValueError:
+                            pass
 
-            tasks = [
-                asyncio.create_task(run_challenge(i, prob), name=f"metactf-{prob.get('id')}")
-                for i, prob in enumerate(selected, 1)
-            ]
+                status = getattr(result, "status", None) if result else None
+                console.print(
+                    f"[dim]Challenge task done: id={pid} {title!r} status={status}[/dim]"
+                )
+                return cost_tracker.total_cost_usd, result, title, pid
+
             poll_task = asyncio.create_task(poll_problems_json_loop(), name="metactf-poll-problems")
+            skip_task: asyncio.Task[None] | None = None
+            if sys.stdin.isatty():
+                skip_task = asyncio.create_task(stdin_skip_loop(), name="metactf-stdin-skip")
 
+            batch_tasks: list[asyncio.Task] = []
             try:
-                outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+                outcomes: list[object] = []
+                for batch_start in range(0, len(selected), METACTF_PARALLEL_CHALLENGES):
+                    batch = selected[batch_start : batch_start + METACTF_PARALLEL_CHALLENGES]
+                    batch_tasks = [
+                        asyncio.create_task(
+                            run_challenge(batch_start + j + 1, prob),
+                            name=f"metactf-{prob.get('id')}",
+                        )
+                        for j, prob in enumerate(batch)
+                    ]
+                    outcomes.extend(await asyncio.gather(*batch_tasks, return_exceptions=True))
             except (KeyboardInterrupt, asyncio.CancelledError):
-                for t in tasks:
+                for t in batch_tasks:
                     t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*batch_tasks, return_exceptions=True)
                 console.print("\n[yellow]Interrupted — cancelling challenges.[/yellow]")
                 raise
             finally:
@@ -340,6 +406,10 @@ async def _run_metactf(
                 poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await poll_task
+                if skip_task is not None:
+                    skip_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await skip_task
 
             for item in outcomes:
                 if isinstance(item, Exception):

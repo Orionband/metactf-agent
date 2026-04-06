@@ -443,9 +443,10 @@ class OpenRouterSolver:
                         # If we still have untried keys, switch keys immediately
                         # instead of sleeping on the current limited key.
                         if len(rate_limited_keys) < len(keys):
-                            logger.warning(
-                                "[%s] OpenRouter 429 on one key; trying next key immediately",
+                            logger.info(
+                                "[%s] 429: %s trying next key.",
                                 self.agent_name,
+                                body_msg[:200],
                             )
                             retries += 1
                             continue
@@ -544,17 +545,25 @@ class OpenRouterSolver:
                     self.tracer.event("error", error=self._findings)
                     return self._result(ERROR, run_cost=None, run_steps=self._step_count)
 
-                except (httpx.ReadTimeout, httpx.ConnectError) as e:
-                    if retries < max_retries:
+                except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as e:
+                    err_s = str(e)
+                    # Transient resolver failures under load are common; retry longer than other errors.
+                    transient_dns = (
+                        "name resolution" in err_s.lower()
+                        or "temporary failure" in err_s.lower()
+                        or "[errno -3]" in err_s.lower()
+                    )
+                    net_cap = max_retries + (8 if transient_dns else 0)
+                    if retries < net_cap:
                         retries += 1
-                        wait_s = min(90.0, backoff_s)
+                        wait_s = min(90.0, backoff_s * (1.4 if transient_dns else 1.0))
                         logger.warning(
                             "[%s] OpenRouter network error — retry %d/%d in %.1fs: %s",
                             self.agent_name,
                             retries,
-                            max_retries,
+                            net_cap,
                             wait_s,
-                            str(e)[:120],
+                            err_s[:120],
                         )
                         await asyncio.sleep(wait_s)
                         backoff_s *= 1.7

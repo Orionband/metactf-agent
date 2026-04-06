@@ -58,15 +58,19 @@ class ChallengeSwarm:
     _started_specs: set[str] = field(default_factory=set)
     slow_solve_seconds: float = 45.0
     slow_solve_alert: Callable[[str], None] | None = None
+    # If set, start these model lanes after slow_solve_seconds with no winner (e.g. Gemini on low-point tiers).
+    slow_solve_escalate_specs: list[str] = field(default_factory=list)
+    slow_solve_escalate_settings: Settings | None = None
 
-    def _create_solver(self, model_spec: str):
+    def _create_solver(self, model_spec: str, solver_settings: Settings | None = None):
+        st = solver_settings if solver_settings is not None else self.settings
         if model_spec.startswith("gemini/"):
             solver = GeminiSolver(
                 model_spec=model_spec,
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
                 cost_tracker=self.cost_tracker,
-                settings=self.settings,
+                settings=st,
                 cancel_event=self.cancel_event,
             )
         else:
@@ -75,7 +79,7 @@ class ChallengeSwarm:
                 challenge_dir=self.challenge_dir,
                 meta=self.meta,
                 cost_tracker=self.cost_tracker,
-                settings=self.settings,
+                settings=st,
                 cancel_event=self.cancel_event,
             )
         solver.deps.message_bus = self.message_bus
@@ -141,8 +145,8 @@ class ChallengeSwarm:
                 self._last_submit_time[model_spec] = time.monotonic()
             return display, is_confirmed
 
-    async def _run_solver(self, model_spec: str) -> SolverResult | None:
-        solver = self._create_solver(model_spec)
+    async def _run_solver(self, model_spec: str, solver_settings: Settings | None = None) -> SolverResult | None:
+        solver = self._create_solver(model_spec, solver_settings)
         self.solvers[model_spec] = solver
 
         try:
@@ -245,11 +249,13 @@ class ChallengeSwarm:
         task_to_spec: dict[asyncio.Task, str] = {}
         fallback_queue = [s for s in self.fallback_model_specs if s not in self.model_specs]
 
-        def _launch_solver(spec: str) -> None:
+        def _launch_solver(spec: str, solver_settings: Settings | None = None) -> None:
             if spec in self._started_specs:
                 return
             self._started_specs.add(spec)
-            task = asyncio.create_task(self._run_solver(spec), name=f"solver-{spec}")
+            task = asyncio.create_task(
+                self._run_solver(spec, solver_settings), name=f"solver-{spec}"
+            )
             task_to_spec[task] = spec
             logger.info("[%s] Solver lane started: %s", self.meta.name, spec)
 
@@ -273,6 +279,21 @@ class ChallengeSwarm:
                     self.slow_solve_alert(msg)
                 else:
                     logger.warning(msg)
+                if (
+                    self.slow_solve_escalate_specs
+                    and not self.cancel_event.is_set()
+                    and self.winner is None
+                ):
+                    esc_settings = self.slow_solve_escalate_settings or self.settings
+                    for spec in self.slow_solve_escalate_specs:
+                        if spec in self._started_specs:
+                            continue
+                        logger.info(
+                            "[%s] Slow solve — adding lane(s): %s",
+                            self.meta.name,
+                            spec,
+                        )
+                        _launch_solver(spec, esc_settings)
 
             slow_alert_task = asyncio.create_task(_slow_solve_notice())
 

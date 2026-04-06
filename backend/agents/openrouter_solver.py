@@ -380,6 +380,19 @@ class OpenRouterSolver:
             backoff_s = 3.0
             auth_failures: set[str] = set()
             rate_limited_keys: set[str] = set()
+            temporary_rate_limit_retries = 0
+
+            def _is_temporary_rate_limit(body_text: str) -> bool:
+                lowered = (body_text or "").lower()
+                temporary_markers = (
+                    "please retry shortly",
+                    "retry shortly",
+                    "temporarily rate-limited",
+                    "temporarily rate limited",
+                    "try again shortly",
+                )
+                return any(marker in lowered for marker in temporary_markers)
+
             while True:
                 try:
                     key = next_openrouter_key(keys)
@@ -465,6 +478,34 @@ class OpenRouterSolver:
 
                     # Retries exhausted or non-429
                     if status == 429:
+                        # Some providers return "please retry shortly" style 429s.
+                        # Keep this lane alive and retry this same model rather than
+                        # surfacing QUOTA_ERROR (which triggers model fallback).
+                        if _is_temporary_rate_limit(body_msg):
+                            retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+                            wait_s: float | None = None
+                            if retry_after:
+                                try:
+                                    wait_s = float(retry_after)
+                                except ValueError:
+                                    wait_s = None
+                            if wait_s is None:
+                                wait_s = backoff_s
+                            wait_s = min(60.0, max(1.0, wait_s))
+                            temporary_rate_limit_retries += 1
+                            logger.warning(
+                                "[%s] Temporary upstream 429 — retrying same model (attempt %d) in %.1fs: %s",
+                                self.agent_name,
+                                temporary_rate_limit_retries,
+                                wait_s,
+                                body_msg[:120],
+                            )
+                            await asyncio.sleep(wait_s)
+                            backoff_s = min(90.0, backoff_s * 1.4)
+                            retries = 0
+                            rate_limited_keys.clear()
+                            continue
+
                         if "free-models-per-day" in body_msg or "per day" in body_msg.lower():
                             logger.warning(
                                 "[%s] OpenRouter free-tier daily quota exhausted for available keys/accounts",

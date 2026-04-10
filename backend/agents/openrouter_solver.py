@@ -386,7 +386,11 @@ class OpenRouterSolver:
                 ]
 
             if self.provider == "openrouter":
-                keys = self.settings.get_openrouter_keys()
+                all_or_keys = self.settings.get_openrouter_keys()
+                if getattr(self.settings, "openrouter_use_first_key_only", False):
+                    keys = all_or_keys[:1] if all_or_keys else []
+                else:
+                    keys = all_or_keys
                 key_selector = next_openrouter_key
                 url = "https://openrouter.ai/api/v1/chat/completions"
                 provider_label = "OpenRouter"
@@ -477,14 +481,15 @@ class OpenRouterSolver:
 
                     if status == 429:
                         bm_low = body_msg.lower()
+                        # Upstream pool busy — not a per-key rate limit; swarm falls back to the next model.
                         if "temporarily rate-limited upstream" in bm_low:
                             logger.info(
-                                "[%s] 429 upstream pool rate limit — ending lane for swarm fallback: %s",
+                                "[%s] 429 upstream busy — switching to fallback lane (not key rate limit): %s",
                                 self.agent_name,
                                 body_msg[:200],
                             )
                             self._findings = (
-                                f"{provider_label} 429 (upstream rate limit): {body_msg[:400]}"
+                                f"{provider_label} 429 (upstream busy, try fallback model): {body_msg[:400]}"
                             )
                             self.tracer.event("error", error=self._findings)
                             return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
@@ -546,7 +551,7 @@ class OpenRouterSolver:
                             wait_s = min(60.0, max(1.0, wait_s))
                             temporary_rate_limit_retries += 1
                             logger.warning(
-                                "[%s] Temporary upstream 429 — retrying same model (attempt %d) in %.1fs: %s",
+                                "[%s] Transient 429 — retrying same model (attempt %d) in %.1fs: %s",
                                 self.agent_name,
                                 temporary_rate_limit_retries,
                                 wait_s,

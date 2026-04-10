@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # Debug
     always_debug_single_model: bool = False
 
+    # When True, OpenRouter requests use only the first configured key (e.g. MetaCTF --pay).
+    openrouter_use_first_key_only: bool = False
+
     # Gemini: comma-separated model ids to rotate on 429/503/… (see --gemini-rotate)
     gemini_rotate_chain: str = ""
 

@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 KIMI_NVIDIA_SPEC = "nvidia/moonshotai/kimi-k2.5"
 GLM_NVIDIA_SPEC = "nvidia/z-ai/glm5"
+METACTF_PAY_OPENROUTER_SPEC = "openrouter/qwen/qwen3.6-plus"
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
 METACTF_PARALLEL_CHALLENGES = 2
 
@@ -78,6 +79,11 @@ def _setup_logging(verbose: bool = False) -> None:
     default=None,
     help="OpenRouter model id for the first slot/lane of multi-model tiers (e.g. z-ai/glm-4.5-air:free).",
 )
+@click.option(
+    "--pay",
+    is_flag=True,
+    help="Paid OpenRouter: use only the first configured API key and qwen/qwen3.6-plus on every challenge.",
+)
 @click.option("-v", "--verbose", is_flag=True)
 def main(
     contest_url: str,
@@ -86,6 +92,7 @@ def main(
     skip: str,
     no_submit: bool,
     custom_openrouter: str | None,
+    pay: bool,
     verbose: bool,
 ) -> None:
     """Solve MetaCTF Compete problems using tiered models and API submission.
@@ -94,8 +101,10 @@ def main(
 
     Points tiers: <=150 three OpenRouter + Kimi(NVIDIA); >150 adds GLM(NVIDIA) + Gemini rotate.
 
-    Requires OPENROUTER_API_KEY; for >200 pt challenges, GEMINI_API_KEY must be set.
-    For <=150 pt challenges, GEMINI_API_KEY is optional: without it, no Gemini lane is added after 45s.
+    With --pay: only OPENROUTER_API_KEY (first key used), qwen/qwen3.6-plus only; NVIDIA/Gemini not required.
+
+    Requires OPENROUTER_API_KEY; for >150 pt challenges, GEMINI_API_KEY must be set (unless --pay).
+    For <=150 pt challenges, GEMINI_API_KEY is optional: without it, no Gemini lane is added after 60s.
     """
     _setup_logging(verbose)
 
@@ -125,12 +134,14 @@ def main(
     eff_limit = None if limit is None or limit <= 0 else limit
 
     custom_spec: str | None = None
-    if custom_openrouter:
+    if custom_openrouter and not pay:
         try:
             custom_spec = openrouter_spec_from_user_id(custom_openrouter)
         except ValueError as e:
             console.print(f"[red]{e}[/red]")
             sys.exit(1)
+    elif custom_openrouter and pay:
+        console.print("[yellow]--pay ignores --custom[/yellow]")
 
     try:
         asyncio.run(
@@ -145,6 +156,7 @@ def main(
                 gemini_keys=gemini_keys,
                 nvidia_keys=nvidia_keys,
                 custom_openrouter_spec=custom_spec,
+                pay=pay,
             )
         )
     except RuntimeError as e:
@@ -164,9 +176,16 @@ async def _run_metactf(
     gemini_keys: list[str],
     nvidia_keys: list[str],
     custom_openrouter_spec: str | None = None,
+    pay: bool = False,
 ) -> None:
+    runner_settings = (
+        settings.model_copy(update={"openrouter_use_first_key_only": True}) if pay else settings
+    )
+
     tier_default_three = (
-        [custom_openrouter_spec] + list(DEFAULT_MODELS[1:]) if custom_openrouter_spec else list(DEFAULT_MODELS)
+        [custom_openrouter_spec] + list(DEFAULT_MODELS[1:])
+        if custom_openrouter_spec and not pay
+        else list(DEFAULT_MODELS)
     )
 
     console.print("[bold]MetaCTF agent[/bold]")
@@ -178,6 +197,10 @@ async def _run_metactf(
     console.print(f"  Gemini keys: {len(gemini_keys)}")
     console.print(f"  Submit: {'no (dry)' if no_submit else 'yes'}")
     console.print(f"  Parallel challenges (max): {METACTF_PARALLEL_CHALLENGES} (batched)")
+    if pay:
+        console.print(
+            f"  Pay mode: first OpenRouter key only, model {METACTF_PAY_OPENROUTER_SPEC}"
+        )
     if custom_openrouter_spec:
         console.print(f"  Custom OpenRouter (first lane): {custom_openrouter_spec}")
     console.print()
@@ -205,30 +228,36 @@ async def _run_metactf(
                 console.print("[yellow]No unsolved challenges matched your filters.[/yellow]")
                 return
 
-            if not nvidia_keys:
+            if not pay and not nvidia_keys:
                 console.print("[red]Set NVIDIA_API_KEY or NVIDIA_API_KEYS (needed for Kimi/GLM lanes).[/red]")
                 sys.exit(1)
 
-            needs_gemini = any(int(p.get("points") or 0) > 150 for p in selected)
-            if needs_gemini and not gemini_keys:
-                console.print("[red]Challenges over 150 points need GEMINI_API_KEY / GEMINI_API_KEYS.[/red]")
-                sys.exit(1)
+            if not pay:
+                needs_gemini = any(int(p.get("points") or 0) > 150 for p in selected)
+                if needs_gemini and not gemini_keys:
+                    console.print(
+                        "[red]Challenges over 150 points need GEMINI_API_KEY / GEMINI_API_KEYS.[/red]"
+                    )
+                    sys.exit(1)
 
             max_models = 1
-            for p in selected:
-                pts = int(p.get("points") or 0)
-                n = len(
-                    model_specs_for_points(
-                        pts,
-                        default_three=tier_default_three,
-                        kimi_nvidia_spec=KIMI_NVIDIA_SPEC,
-                        glm_nvidia_spec=GLM_NVIDIA_SPEC,
+            if pay:
+                max_models = 1
+            else:
+                for p in selected:
+                    pts = int(p.get("points") or 0)
+                    n = len(
+                        model_specs_for_points(
+                            pts,
+                            default_three=tier_default_three,
+                            kimi_nvidia_spec=KIMI_NVIDIA_SPEC,
+                            glm_nvidia_spec=GLM_NVIDIA_SPEC,
+                        )
                     )
-                )
-                max_models = max(max_models, n)
-            if any(int(p.get("points") or 0) <= 150 for p in selected) and gemini_keys:
-                # <=150 tiers can add Gemini rotate after 60s if still unsolved.
-                max_models += 1
+                    max_models = max(max_models, n)
+                if any(int(p.get("points") or 0) <= 150 for p in selected) and gemini_keys:
+                    # <=150 tiers can add Gemini rotate after 60s if still unsolved.
+                    max_models += 1
             configure_semaphore(METACTF_PARALLEL_CHALLENGES * max_models)
 
             await cleanup_orphan_containers()
@@ -299,27 +328,33 @@ async def _run_metactf(
                 title = str(prob.get("title") or "?")
                 pid = int(prob.get("id") or 0)
                 pts = int(prob.get("points") or 0)
-                specs = model_specs_for_points(
-                    pts,
-                    default_three=tier_default_three,
-                    kimi_nvidia_spec=KIMI_NVIDIA_SPEC,
-                    glm_nvidia_spec=GLM_NVIDIA_SPEC,
-                )
-
-                if pts > 150:
-                    st = settings.model_copy(
-                        update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
-                    )
+                if pay:
+                    specs = [METACTF_PAY_OPENROUTER_SPEC]
+                    st = runner_settings.model_copy(update={"gemini_rotate_chain": ""})
+                    slow_escalate_specs: list[str] = []
+                    slow_escalate_st: Settings | None = None
                 else:
-                    st = settings.model_copy(update={"gemini_rotate_chain": ""})
-
-                slow_escalate_specs: list[str] = []
-                slow_escalate_st: Settings | None = None
-                if pts <= 150 and gemini_keys:
-                    slow_escalate_specs = ["gemini/gemini-3-flash-preview"]
-                    slow_escalate_st = st.model_copy(
-                        update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+                    specs = model_specs_for_points(
+                        pts,
+                        default_three=tier_default_three,
+                        kimi_nvidia_spec=KIMI_NVIDIA_SPEC,
+                        glm_nvidia_spec=GLM_NVIDIA_SPEC,
                     )
+
+                    if pts > 150:
+                        st = runner_settings.model_copy(
+                            update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+                        )
+                    else:
+                        st = runner_settings.model_copy(update={"gemini_rotate_chain": ""})
+
+                    slow_escalate_specs = []
+                    slow_escalate_st = None
+                    if pts <= 150 and gemini_keys:
+                        slow_escalate_specs = ["gemini/gemini-3-flash-preview"]
+                        slow_escalate_st = st.model_copy(
+                            update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
+                        )
 
                 slug = slug_challenge_dir(title)
                 ch_dir = str(work_parent / f"id{pid}_{slug}")

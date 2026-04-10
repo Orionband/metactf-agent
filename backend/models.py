@@ -35,6 +35,7 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "z-ai/glm-4.5-air:free": 200_000,
     "moonshotai/kimi-k2.5": 200_000,
     "z-ai/glm5": 200_000,
+    "qwen/qwen3.6-plus": 200_000,
 }
 
 VISION_MODELS: set[str] = {
@@ -44,6 +45,7 @@ VISION_MODELS: set[str] = {
     "nvidia/nemotron-3-super-120b-a12b:free",
     "openai/gpt-oss-120b:free",
     "z-ai/glm-4.5-air:free",
+    "qwen/qwen3.6-plus",
 }
 
 

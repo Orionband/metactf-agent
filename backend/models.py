@@ -12,32 +12,30 @@ from pydantic_ai.settings import ModelSettings
 if TYPE_CHECKING:
     from backend.config import Settings
 
-# Default model specs (provider is always openrouter)
+# Default model specs
 DEFAULT_MODELS: list[str] = [
-    "openrouter/qwen/qwen3.6-plus:free",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/openai/gpt-oss-120b:free",
     "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-    "openrouter/stepfun/step-3.5-flash:free",
 ]
 
 FALLBACK_MODELS: list[str] = [
-    "openrouter/qwen/qwen3-next-80b-a3b-instruct:free",
     "openrouter/openai/gpt-oss-120b:free",
+    "openrouter/qwen/qwen3-coder:free",
 ]
 
 CONTEXT_WINDOWS: dict[str, int] = {
-    "qwen/qwen3.6-plus:free": 200_000,
+    "google/gemma-4-31b-it:free": 200_000,
     "nvidia/nemotron-3-super-120b-a12b:free": 200_000,
-    "stepfun/step-3.5-flash:free": 200_000,
-    "qwen/qwen3-next-80b-a3b-instruct:free": 200_000,
     "openai/gpt-oss-120b:free": 200_000,
+    "qwen/qwen3-coder:free": 200_000,
 }
 
 VISION_MODELS: set[str] = {
-    "qwen/qwen3.6-plus:free",
+    "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "stepfun/step-3.5-flash:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
     "openai/gpt-oss-120b:free",
+    "qwen/qwen3-coder:free",
 }
 
 
@@ -83,7 +81,7 @@ def model_id_from_spec(spec: str) -> str:
 
 
 def provider_from_spec(spec: str) -> str:
-    """Extract the provider from a spec (always openrouter for valid specs)."""
+    """Extract the provider from a spec."""
     return spec.split("/", 1)[0]
 
 

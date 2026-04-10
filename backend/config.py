@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Gemini direct API key(s)
     gemini_api_key: str = ""
     gemini_api_keys: str = ""
+    # NVIDIA NIM API key(s)
+    nvidia_api_key: str = ""
+    nvidia_api_keys: str = ""
 
     # Optional: coordinator uses this model spec (openrouter/...); empty = first DEFAULT_MODELS entry
     coordinator_model: str = ""
@@ -74,6 +77,29 @@ class Settings(BaseSettings):
                     keys.append(k)
         if self.gemini_api_key and self.gemini_api_key.strip():
             key = self.gemini_api_key.strip().strip('"').strip("'")
+            if key not in keys:
+                keys.append(key)
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for k in keys:
+            if k in seen:
+                continue
+            seen.add(k)
+            deduped.append(k)
+        return deduped
+
+    def get_nvidia_keys(self) -> list[str]:
+        """Get all configured NVIDIA API keys (multi-key first, then single-key fallback)."""
+        keys: list[str] = []
+        if self.nvidia_api_keys:
+            raw = self.nvidia_api_keys
+            parts = re.split(r"[\s,;]+", raw)
+            for p in parts:
+                k = p.strip().strip('"').strip("'")
+                if k:
+                    keys.append(k)
+        if self.nvidia_api_key and self.nvidia_api_key.strip():
+            key = self.nvidia_api_key.strip().strip('"').strip("'")
             if key not in keys:
                 keys.append(key)
         deduped: list[str] = []

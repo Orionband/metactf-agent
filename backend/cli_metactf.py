@@ -37,7 +37,8 @@ from backend.solver_base import FLAG_FOUND
 console = Console()
 logger = logging.getLogger(__name__)
 
-QWEN_SPEC = "openrouter/qwen/qwen3.6-plus:free"
+KIMI_NVIDIA_SPEC = "nvidia/moonshotai/kimi-k2-instruct"
+GLM_NVIDIA_SPEC = "nvidia/z-ai/glm5"
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
 METACTF_PARALLEL_CHALLENGES = 2
 
@@ -91,7 +92,7 @@ def main(
 
     CONTEST_URL may be compete.metactf.com/576 or full https URL.
 
-    Points tiers: <=150 Qwen + GPT-OSS; 151-200 three OpenRouter models; >200 three + Gemini rotate.
+    Points tiers: <=150 three OpenRouter + Kimi(NVIDIA); >150 adds GLM(NVIDIA) + Gemini rotate.
 
     Requires OPENROUTER_API_KEY; for >200 pt challenges, GEMINI_API_KEY must be set.
     For <=150 pt challenges, GEMINI_API_KEY is optional: without it, no Gemini lane is added after 45s.
@@ -114,6 +115,7 @@ def main(
     settings = Settings()
     openrouter_keys = settings.get_openrouter_keys()
     gemini_keys = settings.get_gemini_keys()
+    nvidia_keys = settings.get_nvidia_keys()
 
     if not openrouter_keys:
         console.print("[red]Set OPENROUTER_API_KEY or OPENROUTER_API_KEYS.[/red]")
@@ -141,6 +143,7 @@ def main(
                 no_submit=no_submit,
                 openrouter_keys=openrouter_keys,
                 gemini_keys=gemini_keys,
+                nvidia_keys=nvidia_keys,
                 custom_openrouter_spec=custom_spec,
             )
         )
@@ -159,18 +162,19 @@ async def _run_metactf(
     no_submit: bool,
     openrouter_keys: list[str],
     gemini_keys: list[str],
+    nvidia_keys: list[str],
     custom_openrouter_spec: str | None = None,
 ) -> None:
     tier_default_three = (
         [custom_openrouter_spec] + list(DEFAULT_MODELS[1:]) if custom_openrouter_spec else list(DEFAULT_MODELS)
     )
-    qwen_effective = custom_openrouter_spec if custom_openrouter_spec else QWEN_SPEC
 
     console.print("[bold]MetaCTF agent[/bold]")
     console.print(f"  Contest: {base_url}")
     console.print(f"  Skip: {skip_titles or '(none)'}")
     console.print(f"  Limit: {eff_limit or 'all unsolved'}")
     console.print(f"  OpenRouter keys: {len(openrouter_keys)}")
+    console.print(f"  NVIDIA keys: {len(nvidia_keys)}")
     console.print(f"  Gemini keys: {len(gemini_keys)}")
     console.print(f"  Submit: {'no (dry)' if no_submit else 'yes'}")
     console.print(f"  Parallel challenges (max): {METACTF_PARALLEL_CHALLENGES} (batched)")
@@ -201,26 +205,29 @@ async def _run_metactf(
                 console.print("[yellow]No unsolved challenges matched your filters.[/yellow]")
                 return
 
-            needs_gemini = any(int(p.get("points") or 0) > 200 for p in selected)
-            if needs_gemini and not gemini_keys:
-                console.print("[red]Challenges over 200 points need GEMINI_API_KEY / GEMINI_API_KEYS.[/red]")
+            if not nvidia_keys:
+                console.print("[red]Set NVIDIA_API_KEY or NVIDIA_API_KEYS (needed for Kimi/GLM lanes).[/red]")
                 sys.exit(1)
 
-            if any(int(p.get("points") or 0) <= 150 for p in selected) and not gemini_keys:
-                console.print(
-                    "[yellow]No GEMINI keys: <=150 pt challenges will not add Gemini after 45s without a solve.[/yellow]"
-                )
+            needs_gemini = any(int(p.get("points") or 0) > 150 for p in selected)
+            if needs_gemini and not gemini_keys:
+                console.print("[red]Challenges over 150 points need GEMINI_API_KEY / GEMINI_API_KEYS.[/red]")
+                sys.exit(1)
 
             max_models = 1
             for p in selected:
                 pts = int(p.get("points") or 0)
                 n = len(
                     model_specs_for_points(
-                        pts, default_three=tier_default_three, qwen_spec=qwen_effective
+                        pts,
+                        default_three=tier_default_three,
+                        kimi_nvidia_spec=KIMI_NVIDIA_SPEC,
+                        glm_nvidia_spec=GLM_NVIDIA_SPEC,
                     )
                 )
                 max_models = max(max_models, n)
             if any(int(p.get("points") or 0) <= 150 for p in selected) and gemini_keys:
+                # <=150 tiers can add Gemini rotate after 60s if still unsolved.
                 max_models += 1
             configure_semaphore(METACTF_PARALLEL_CHALLENGES * max_models)
 
@@ -293,10 +300,13 @@ async def _run_metactf(
                 pid = int(prob.get("id") or 0)
                 pts = int(prob.get("points") or 0)
                 specs = model_specs_for_points(
-                    pts, default_three=tier_default_three, qwen_spec=qwen_effective
+                    pts,
+                    default_three=tier_default_three,
+                    kimi_nvidia_spec=KIMI_NVIDIA_SPEC,
+                    glm_nvidia_spec=GLM_NVIDIA_SPEC,
                 )
 
-                if pts > 200:
+                if pts > 150:
                     st = settings.model_copy(
                         update={"gemini_rotate_chain": "gemini-3-flash-preview,gemini-2.5-flash"}
                     )
@@ -354,6 +364,7 @@ async def _run_metactf(
                     metactf_problem_id=pid,
                     metactf_http=client,
                     slow_solve_alert=lambda m: console.print(f"[yellow]{m}[/yellow]"),
+                    slow_solve_seconds=60.0,
                     slow_solve_escalate_specs=slow_escalate_specs,
                     slow_solve_escalate_settings=slow_escalate_st if slow_escalate_specs else None,
                 )

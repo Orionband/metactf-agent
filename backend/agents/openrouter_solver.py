@@ -29,6 +29,7 @@ from backend.cost_tracker import CostTracker
 from backend.deps import SolverDeps
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import model_id_from_spec, provider_from_spec
+from backend.nvidia_key_pool import next_nvidia_key
 from backend.prompts import ChallengeMeta, build_prompt
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
@@ -64,7 +65,7 @@ class _ToolDef:
 
 
 class OpenRouterSolver:
-    """A single solver: one model, one container, one challenge."""
+    """A single solver over OpenAI-compatible APIs (OpenRouter/NVIDIA)."""
 
     def __init__(
         self,
@@ -79,6 +80,7 @@ class OpenRouterSolver:
     ) -> None:
         self.model_spec = model_spec
         self.model_id = model_id_from_spec(model_spec)
+        self.provider = provider_from_spec(model_spec)
         self.challenge_dir = challenge_dir
         self.meta = meta
         self.cost_tracker = cost_tracker
@@ -371,8 +373,24 @@ class OpenRouterSolver:
                     for t in self._tool_defs.values()
                 ]
 
-            keys = self.settings.get_openrouter_keys()
-            url = "https://openrouter.ai/api/v1/chat/completions"
+            if self.provider == "openrouter":
+                keys = self.settings.get_openrouter_keys()
+                key_selector = next_openrouter_key
+                url = "https://openrouter.ai/api/v1/chat/completions"
+                provider_label = "OpenRouter"
+            elif self.provider == "nvidia":
+                keys = self.settings.get_nvidia_keys()
+                key_selector = next_nvidia_key
+                url = "https://integrate.api.nvidia.com/v1/chat/completions"
+                provider_label = "NVIDIA"
+            else:
+                self._findings = f"Unsupported provider for this solver: {self.provider}"
+                self.tracer.event("error", error=self._findings)
+                return self._result(ERROR, run_cost=None, run_steps=self._step_count)
+            if not keys:
+                self._findings = f"{provider_label} API key(s) are not configured."
+                self.tracer.event("error", error=self._findings)
+                return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
             # Retry for rate limits and transient network errors.
             retries = 0
@@ -395,7 +413,7 @@ class OpenRouterSolver:
 
             while True:
                 try:
-                    key = next_openrouter_key(keys)
+                    key = key_selector(keys)
                     headers = {"Authorization": f"Bearer {key}"}
                     if debug_enabled:
                         masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***"
@@ -423,15 +441,16 @@ class OpenRouterSolver:
                         auth_failures.add(key)
                         if len(auth_failures) < len(keys):
                             logger.warning(
-                                "[%s] OpenRouter auth failed for one key (%s); trying next key",
+                                "[%s] %s auth failed for one key (%s); trying next key",
                                 self.agent_name,
+                                provider_label,
                                 status,
                             )
                             retries += 1
                             await asyncio.sleep(0.2)
                             continue
                         self._findings = (
-                            f"OpenRouter authentication failed (HTTP {status}). "
+                            f"{provider_label} authentication failed (HTTP {status}). "
                             "All configured API keys were rejected. "
                             "Check OPENROUTER_API_KEY / OPENROUTER_API_KEYS."
                         )
@@ -465,8 +484,9 @@ class OpenRouterSolver:
                                 wait_s = backoff_s
                             wait_s = min(90.0, max(1.0, wait_s))
                             logger.warning(
-                                "[%s] OpenRouter 429 on all keys — retry %d/%d in %.1fs: %s",
+                                "[%s] %s 429 on all keys — retry %d/%d in %.1fs: %s",
                                 self.agent_name,
+                                provider_label,
                                 retries,
                                 max_retries,
                                 wait_s,
@@ -509,15 +529,16 @@ class OpenRouterSolver:
 
                         if "free-models-per-day" in body_msg or "per day" in body_msg.lower():
                             logger.warning(
-                                "[%s] OpenRouter free-tier daily quota exhausted for available keys/accounts",
+                            "[%s] %s free-tier daily quota exhausted for available keys/accounts",
                                 self.agent_name,
+                            provider_label,
                             )
                         logger.warning(
                             "[%s] Final 429 body: %s",
                             self.agent_name,
                             body_msg[:300],
                         )
-                        self._findings = f"OpenRouter 429 after retries: {body_msg}"
+                        self._findings = f"{provider_label} 429 after retries: {body_msg}"
                         self.tracer.event("error", error=self._findings)
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
@@ -526,7 +547,7 @@ class OpenRouterSolver:
                         s in bm_low for s in ("guardrail", "data policy", "privacy")
                     ):
                         hint = (
-                            "OpenRouter 404: no endpoint matches your account privacy/guardrail settings "
+                            f"{provider_label} 404: no endpoint matches your account privacy/guardrail settings "
                             "(https://openrouter.ai/settings/privacy). Relax data-policy filters or choose another model."
                         )
                         self._findings = f"{hint} API: {body_msg[:400]}"
@@ -535,8 +556,9 @@ class OpenRouterSolver:
                         return self._result(ERROR, run_cost=None, run_steps=self._step_count)
 
                     logger.error(
-                        "[%s] OpenRouter HTTP error (%s): %s",
+                        "[%s] %s HTTP error (%s): %s",
                         self.agent_name,
+                        provider_label,
                         status,
                         body_msg[:120],
                         exc_info=True,
@@ -558,8 +580,9 @@ class OpenRouterSolver:
                         retries += 1
                         wait_s = min(90.0, backoff_s * (1.4 if transient_dns else 1.0))
                         logger.warning(
-                            "[%s] OpenRouter network error — retry %d/%d in %.1fs: %s",
+                            "[%s] %s network error — retry %d/%d in %.1fs: %s",
                             self.agent_name,
+                            provider_label,
                             retries,
                             net_cap,
                             wait_s,
@@ -574,7 +597,7 @@ class OpenRouterSolver:
                     return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                 except Exception as e:
-                    logger.error("[%s] OpenRouter error: %s", self.agent_name, e, exc_info=True)
+                    logger.error("[%s] %s error: %s", self.agent_name, provider_label, e, exc_info=True)
                     self._findings = f"Error: {e}"
                     self.tracer.event("error", error=str(e))
                     return self._result(ERROR, run_cost=None, run_steps=self._step_count)

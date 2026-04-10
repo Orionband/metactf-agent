@@ -259,10 +259,14 @@ def problem_to_challenge_files(problem: dict[str, Any], dest_dir: str) -> None:
     (root / "challenge.txt").write_text(header + desc_md + footer, encoding="utf-8")
 
 
-def model_specs_for_points(points: int, *, default_three: list[str], qwen_spec: str) -> list[str]:
-    """<=150: Qwen + GPT-OSS; 151–200: three OpenRouter; >200: three + Gemini (rotate via settings)."""
+def model_specs_for_points(
+    points: int,
+    *,
+    default_three: list[str],
+    kimi_nvidia_spec: str,
+    glm_nvidia_spec: str,
+) -> list[str]:
+    """<=150: three OpenRouter + Kimi(NVIDIA); >150: those + GLM(NVIDIA) + Gemini."""
     if points <= 150:
-        return [qwen_spec, "openrouter/openai/gpt-oss-120b:free"]
-    if points <= 200:
-        return list(default_three)
-    return list(default_three) + ["gemini/gemini-3-flash-preview"]
+        return list(default_three) + [kimi_nvidia_spec]
+    return list(default_three) + [kimi_nvidia_spec, glm_nvidia_spec, "gemini/gemini-3-flash-preview"]

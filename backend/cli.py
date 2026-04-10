@@ -140,15 +140,20 @@ def main(
     )
     openrouter_keys = settings.get_openrouter_keys()
     gemini_keys = settings.get_gemini_keys()
+    nvidia_keys = settings.get_nvidia_keys()
 
     needs_openrouter = any(m.startswith("openrouter/") for m in model_specs)
     needs_gemini = any(m.startswith("gemini/") for m in model_specs)
+    needs_nvidia = any(m.startswith("nvidia/") for m in model_specs)
 
     if needs_openrouter and not openrouter_keys:
         console.print("[red]Set OPENROUTER_API_KEY or OPENROUTER_API_KEYS in .env or the environment.[/red]")
         sys.exit(1)
     if needs_gemini and not gemini_keys:
         console.print("[red]Set GEMINI_API_KEY or GEMINI_API_KEYS in .env or the environment.[/red]")
+        sys.exit(1)
+    if needs_nvidia and not nvidia_keys:
+        console.print("[red]Set NVIDIA_API_KEY or NVIDIA_API_KEYS in .env or the environment.[/red]")
         sys.exit(1)
 
     if check_keys:
@@ -166,6 +171,8 @@ def main(
             console.print(f"  OpenRouter keys: {len(openrouter_keys)} configured")
         if needs_gemini:
             console.print(f"  Gemini keys: {len(gemini_keys)} configured")
+        if needs_nvidia:
+            console.print(f"  NVIDIA keys: {len(nvidia_keys)} configured")
         if getattr(settings, "gemini_rotate_chain", "").strip():
             console.print(f"  Gemini rotate: {settings.gemini_rotate_chain}")
         console.print()
@@ -190,6 +197,8 @@ def main(
         console.print(f"  OpenRouter keys: {len(openrouter_keys)} configured")
     if needs_gemini:
         console.print(f"  Gemini keys: {len(gemini_keys)} configured")
+    if needs_nvidia:
+        console.print(f"  NVIDIA keys: {len(nvidia_keys)} configured")
     if getattr(settings, "gemini_rotate_chain", "").strip():
         console.print(f"  Gemini rotate: {settings.gemini_rotate_chain}")
     console.print()
@@ -286,7 +295,11 @@ def _select_models(
         elif include_gemini and "gemini/gemini-flash-latest" not in models:
             models.append("gemini/gemini-flash-latest")
         return models
-    if not spec.startswith("openrouter/") and not spec.startswith("gemini/"):
+    if (
+        not spec.startswith("openrouter/")
+        and not spec.startswith("gemini/")
+        and not spec.startswith("nvidia/")
+    ):
         if spec.startswith("gemini-") or spec.startswith("models/gemini"):
             spec = f"gemini/{spec.replace('models/', '')}"
         else:

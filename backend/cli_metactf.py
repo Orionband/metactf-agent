@@ -76,7 +76,7 @@ def _setup_logging(verbose: bool = False) -> None:
     "--custom",
     "custom_openrouter",
     default=None,
-    help="OpenRouter model id for the Qwen slot and first lane of multi-model tiers (e.g. qwen/qwen3.7-plus:free).",
+    help="OpenRouter model id for the first slot/lane of multi-model tiers (e.g. z-ai/glm-4.5-air:free).",
 )
 @click.option("-v", "--verbose", is_flag=True)
 def main(
@@ -179,7 +179,7 @@ async def _run_metactf(
     console.print(f"  Submit: {'no (dry)' if no_submit else 'yes'}")
     console.print(f"  Parallel challenges (max): {METACTF_PARALLEL_CHALLENGES} (batched)")
     if custom_openrouter_spec:
-        console.print(f"  Custom OpenRouter (Qwen / first lane): {custom_openrouter_spec}")
+        console.print(f"  Custom OpenRouter (first lane): {custom_openrouter_spec}")
     console.print()
 
     work_parent = Path(tempfile.mkdtemp(prefix="metactf_agent_"))

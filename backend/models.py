@@ -21,21 +21,21 @@ DEFAULT_MODELS: list[str] = [
 
 FALLBACK_MODELS: list[str] = [
     "openrouter/openai/gpt-oss-120b:free",
-    "openrouter/qwen/qwen3-coder:free",
+    "openrouter/z-ai/glm-4.5-air:free",
 ]
 
 CONTEXT_WINDOWS: dict[str, int] = {
     "google/gemma-4-31b-it:free": 200_000,
     "nvidia/nemotron-3-super-120b-a12b:free": 200_000,
     "openai/gpt-oss-120b:free": 200_000,
-    "qwen/qwen3-coder:free": 200_000,
+    "z-ai/glm-4.5-air:free": 200_000,
 }
 
 VISION_MODELS: set[str] = {
     "google/gemma-4-31b-it:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "openai/gpt-oss-120b:free",
-    "qwen/qwen3-coder:free",
+    "z-ai/glm-4.5-air:free",
 }
 
 

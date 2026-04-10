@@ -18,11 +18,10 @@ PROVIDER_MAP: dict[str, str] = {
 
 # Fallback pricing for models not in genai-prices (per 1M tokens, USD)
 FALLBACK_PRICING: dict[str, dict[str, float]] = {
-    "qwen/qwen3.6-plus:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
-    "qwen/qwen3-next-80b-a3b-instruct:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemma-4-31b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "z-ai/glm-4.5-air:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "openai/gpt-oss-120b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "nvidia/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
-    "stepfun/step-3.5-flash:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "gemini-3-flash-preview": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "gemini-2.5-flash": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "gemini-flash-latest": {"input": 0.0, "cached_input": 0.0, "output": 0.0},

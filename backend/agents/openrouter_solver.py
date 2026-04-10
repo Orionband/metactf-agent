@@ -480,20 +480,9 @@ class OpenRouterSolver:
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     if status == 429:
-                        bm_low = body_msg.lower()
-                        # Upstream pool busy — not a per-key rate limit; swarm falls back to the next model.
-                        if "temporarily rate-limited upstream" in bm_low:
-                            logger.info(
-                                "[%s] 429 upstream busy — switching to fallback lane (not key rate limit): %s",
-                                self.agent_name,
-                                body_msg[:200],
-                            )
-                            self._findings = (
-                                f"{provider_label} 429 (upstream busy, try fallback model): {body_msg[:400]}"
-                            )
-                            self.tracer.event("error", error=self._findings)
-                            return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
-
+                        # Rotate through every configured key on 429; only after all keys have hit 429
+                        # in this cycle do we backoff together, then eventually surface QUOTA_ERROR so the
+                        # swarm can try fallback models. (Upstream-pool messages still apply per attempt.)
                         rate_limited_keys.add(key)
                         # If we still have untried keys, switch keys immediately
                         # instead of sleeping on the current limited key.

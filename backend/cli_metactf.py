@@ -37,7 +37,7 @@ from backend.solver_base import FLAG_FOUND
 console = Console()
 logger = logging.getLogger(__name__)
 
-KIMI_NVIDIA_SPEC = "nvidia/moonshotai/kimi-k2-instruct"
+KIMI_NVIDIA_SPEC = "nvidia/moonshotai/kimi-k2.5"
 GLM_NVIDIA_SPEC = "nvidia/z-ai/glm5"
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
 METACTF_PARALLEL_CHALLENGES = 2

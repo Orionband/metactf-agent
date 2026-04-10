@@ -357,8 +357,20 @@ class OpenRouterSolver:
             request_body: dict[str, Any] = {
                 "model": self.model_id,
                 "messages": self._messages[-200:],
-                "reasoning": {"enabled": True},
             }
+            if self.provider == "openrouter":
+                request_body["reasoning"] = {"enabled": True}
+            elif self.provider == "nvidia":
+                request_body["max_tokens"] = 16384
+                request_body["temperature"] = 1.0
+                request_body["top_p"] = 1.0
+                if "moonshotai/kimi-k2" in self.model_id:
+                    request_body["chat_template_kwargs"] = {"thinking": True}
+                elif self.model_id == "z-ai/glm5":
+                    request_body["chat_template_kwargs"] = {
+                        "enable_thinking": True,
+                        "clear_thinking": False,
+                    }
 
             if self._tools_enabled:
                 request_body["tools"] = [
@@ -402,6 +414,8 @@ class OpenRouterSolver:
 
             def _is_temporary_rate_limit(body_text: str) -> bool:
                 lowered = (body_text or "").lower()
+                if "temporarily rate-limited upstream" in lowered:
+                    return False
                 temporary_markers = (
                     "please retry shortly",
                     "retry shortly",
@@ -449,15 +463,32 @@ class OpenRouterSolver:
                             retries += 1
                             await asyncio.sleep(0.2)
                             continue
+                        key_help = (
+                            "Check OPENROUTER_API_KEY / OPENROUTER_API_KEYS."
+                            if self.provider == "openrouter"
+                            else "Check NVIDIA_API_KEY / NVIDIA_API_KEYS."
+                        )
                         self._findings = (
                             f"{provider_label} authentication failed (HTTP {status}). "
-                            "All configured API keys were rejected. "
-                            "Check OPENROUTER_API_KEY / OPENROUTER_API_KEYS."
+                            f"All configured API keys were rejected. {key_help}"
                         )
                         self.tracer.event("error", error=self._findings)
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     if status == 429:
+                        bm_low = body_msg.lower()
+                        if "temporarily rate-limited upstream" in bm_low:
+                            logger.info(
+                                "[%s] 429 upstream pool rate limit — ending lane for swarm fallback: %s",
+                                self.agent_name,
+                                body_msg[:200],
+                            )
+                            self._findings = (
+                                f"{provider_label} 429 (upstream rate limit): {body_msg[:400]}"
+                            )
+                            self.tracer.event("error", error=self._findings)
+                            return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
+
                         rate_limited_keys.add(key)
                         # If we still have untried keys, switch keys immediately
                         # instead of sleeping on the current limited key.
@@ -529,9 +560,9 @@ class OpenRouterSolver:
 
                         if "free-models-per-day" in body_msg or "per day" in body_msg.lower():
                             logger.warning(
-                            "[%s] %s free-tier daily quota exhausted for available keys/accounts",
+                                "[%s] %s free-tier daily quota exhausted for available keys/accounts",
                                 self.agent_name,
-                            provider_label,
+                                provider_label,
                             )
                         logger.warning(
                             "[%s] Final 429 body: %s",
@@ -543,11 +574,13 @@ class OpenRouterSolver:
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     bm_low = body_msg.lower()
-                    if status == 404 and any(
-                        s in bm_low for s in ("guardrail", "data policy", "privacy")
+                    if (
+                        status == 404
+                        and self.provider == "openrouter"
+                        and any(s in bm_low for s in ("guardrail", "data policy", "privacy"))
                     ):
                         hint = (
-                            f"{provider_label} 404: no endpoint matches your account privacy/guardrail settings "
+                            "OpenRouter 404: no endpoint matches your account privacy/guardrail settings "
                             "(https://openrouter.ai/settings/privacy). Relax data-policy filters or choose another model."
                         )
                         self._findings = f"{hint} API: {body_msg[:400]}"

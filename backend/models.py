@@ -14,25 +14,33 @@ if TYPE_CHECKING:
 
 # Default model specs
 DEFAULT_MODELS: list[str] = [
-    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "nvidia/google/gemma-3-27b-it",
     "openrouter/openai/gpt-oss-120b:free",
     "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
 ]
 
 FALLBACK_MODELS: list[str] = [
+    "openrouter/google/gemma-4-31b-it:free",
     "openrouter/openai/gpt-oss-120b:free",
     "openrouter/z-ai/glm-4.5-air:free",
 ]
 
 CONTEXT_WINDOWS: dict[str, int] = {
+    "google/gemma-4-26b-a4b-it:free": 200_000,
     "google/gemma-4-31b-it:free": 200_000,
+    "google/gemma-3-27b-it": 200_000,
     "nvidia/nemotron-3-super-120b-a12b:free": 200_000,
     "openai/gpt-oss-120b:free": 200_000,
     "z-ai/glm-4.5-air:free": 200_000,
+    "moonshotai/kimi-k2.5": 200_000,
+    "z-ai/glm5": 200_000,
 }
 
 VISION_MODELS: set[str] = {
+    "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
+    "google/gemma-3-27b-it",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "openai/gpt-oss-120b:free",
     "z-ai/glm-4.5-air:free",

@@ -14,11 +14,16 @@ logger = logging.getLogger(__name__)
 # Provider ID mapping for genai-prices
 PROVIDER_MAP: dict[str, str] = {
     "openrouter": "openai",
+    "nvidia": "openai",
 }
 
 # Fallback pricing for models not in genai-prices (per 1M tokens, USD)
 FALLBACK_PRICING: dict[str, dict[str, float]] = {
+    "google/gemma-4-26b-a4b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "google/gemma-4-31b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemma-3-27b-it": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "moonshotai/kimi-k2.5": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "z-ai/glm5": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "z-ai/glm-4.5-air:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "openai/gpt-oss-120b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "nvidia/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},

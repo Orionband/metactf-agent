@@ -195,8 +195,8 @@ class ChallengeSwarm:
 
             if result.status == QUOTA_ERROR:
                 logger.warning(
-                    "[%s/%s] Stopping this lane — OpenRouter/NVIDIA already tried every configured key "
-                    "(and backoff retries) or hit auth/quota exhaustion; other model lanes / fallbacks continue",
+                    "[%s/%s] Lane stopped (quota, all keys 429 in one pass, auth failure, "
+                    "upstream-busy→fallback, or network limit) — not bumping this model",
                     self.meta.name,
                     model_spec,
                 )

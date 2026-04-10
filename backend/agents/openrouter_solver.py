@@ -408,6 +408,8 @@ class OpenRouterSolver:
                 self.tracer.event("error", error=self._findings)
                 return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
+            unique_keys = list(dict.fromkeys(keys))
+
             # Retry for rate limits and transient network errors.
             retries = 0
             max_retries = 6
@@ -415,6 +417,7 @@ class OpenRouterSolver:
             auth_failures: set[str] = set()
             rate_limited_keys: set[str] = set()
             temporary_rate_limit_retries = 0
+            first_key_in_http_round = True
 
             def _is_temporary_rate_limit(body_text: str) -> bool:
                 lowered = (body_text or "").lower()
@@ -431,7 +434,16 @@ class OpenRouterSolver:
 
             while True:
                 try:
-                    key = key_selector(keys)
+                    # First attempt: round-robin across keys (load spread). After 429 on a key, try each
+                    # remaining key once in config order so we don't skip keys or retry backoff when all fail.
+                    if first_key_in_http_round:
+                        key = key_selector(keys)
+                        first_key_in_http_round = False
+                    elif len(rate_limited_keys) < len(unique_keys):
+                        nxt = next((k for k in unique_keys if k not in rate_limited_keys), None)
+                        key = nxt if nxt is not None else unique_keys[0]
+                    else:
+                        key = unique_keys[0]
                     headers = {"Authorization": f"Bearer {key}"}
                     if debug_enabled:
                         masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***"
@@ -457,7 +469,7 @@ class OpenRouterSolver:
                     # Auth failure: try other keys first (if available), then fail clearly.
                     if status in (401, 403):
                         auth_failures.add(key)
-                        if len(auth_failures) < len(keys):
+                        if len(auth_failures) < len(unique_keys):
                             logger.warning(
                                 "[%s] %s auth failed for one key (%s); trying next key",
                                 self.agent_name,
@@ -480,47 +492,43 @@ class OpenRouterSolver:
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     if status == 429:
-                        # Rotate through every configured key on 429; only after all keys have hit 429
-                        # in this cycle do we backoff together, then eventually surface QUOTA_ERROR so the
-                        # swarm can try fallback models. (Upstream-pool messages still apply per attempt.)
-                        rate_limited_keys.add(key)
-                        # If we still have untried keys, switch keys immediately
-                        # instead of sleeping on the current limited key.
-                        if len(rate_limited_keys) < len(keys):
+                        bm_low = body_msg.lower()
+                        # Upstream pool busy — not a per-key rate limit; swarm falls back to the next model.
+                        if "temporarily rate-limited upstream" in bm_low:
                             logger.info(
-                                "[%s] 429: %s trying next key.",
+                                "[%s] 429 upstream busy — switching to fallback lane (not key rate limit): %s",
                                 self.agent_name,
                                 body_msg[:200],
                             )
-                            retries += 1
+                            self._findings = (
+                                f"{provider_label} 429 (upstream busy, try fallback model): {body_msg[:400]}"
+                            )
+                            self.tracer.event("error", error=self._findings)
+                            return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
+
+                        rate_limited_keys.add(key)
+                        if len(rate_limited_keys) < len(unique_keys):
+                            logger.info(
+                                "[%s] 429: %s trying next key (%d/%d distinct keys seen 429).",
+                                self.agent_name,
+                                body_msg[:200],
+                                len(rate_limited_keys),
+                                len(unique_keys),
+                            )
                             continue
 
-                        # All keys are currently rate limited; only now back off.
-                        if retries < max_retries:
-                            retries += 1
-                            retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
-                            wait_s: float | None = None
-                            if retry_after:
-                                try:
-                                    wait_s = float(retry_after)
-                                except ValueError:
-                                    wait_s = None
-                            if wait_s is None:
-                                wait_s = backoff_s
-                            wait_s = min(90.0, max(1.0, wait_s))
-                            logger.warning(
-                                "[%s] %s 429 on all keys — retry %d/%d in %.1fs: %s",
-                                self.agent_name,
-                                provider_label,
-                                retries,
-                                max_retries,
-                                wait_s,
-                                body_msg[:120],
-                            )
-                            await asyncio.sleep(wait_s)
-                            backoff_s *= 1.7
-                            rate_limited_keys.clear()
-                            continue
+                        # Every configured key returned 429 in this pass — stop (no multi-round backoff).
+                        logger.warning(
+                            "[%s] %s 429 on all %d key(s) in one pass — stopping lane",
+                            self.agent_name,
+                            provider_label,
+                            len(unique_keys),
+                        )
+                        self._findings = (
+                            f"{provider_label} 429: all keys rate-limited this round: {body_msg[:400]}"
+                        )
+                        self.tracer.event("error", error=self._findings)
+                        return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     # Retries exhausted or non-429
                     if status == 429:

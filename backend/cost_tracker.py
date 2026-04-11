@@ -20,7 +20,9 @@ PROVIDER_MAP: dict[str, str] = {
 # Fallback pricing for models not in genai-prices (per 1M tokens, USD)
 FALLBACK_PRICING: dict[str, dict[str, float]] = {
     "google/gemma-4-26b-a4b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemma-4-26b-a4b-it": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "google/gemma-4-31b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemma-4-31b-it": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "google/gemma-3-27b-it": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "moonshotai/kimi-k2.5": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "qwen/qwen3.6-plus": {"input": 0.0, "cached_input": 0.0, "output": 0.0},

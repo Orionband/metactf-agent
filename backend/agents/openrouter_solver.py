@@ -147,26 +147,31 @@ class OpenRouterSolver:
         # Tool schemas are OpenAI-compatible JSON Schema for function calling.
         # We omit `tool_choice` at the HTTP layer to avoid OpenRouter routing 404s.
 
-        async def _bash(command: str, timeout_seconds: int = 60) -> str:
+        async def _bash(command: str = "", timeout_seconds: int = 60) -> str:
+            if not command: return "Error: missing 'command'"
             result = await do_bash(self.sandbox, command, timeout_seconds=timeout_seconds)
             return result
 
-        async def _read_file(path: str) -> str:
+        async def _read_file(path: str = "") -> str:
+            if not path: return "Error: missing 'path'"
             return await do_read_file(self.sandbox, path)
 
-        async def _write_file(path: str, content: str) -> str:
+        async def _write_file(path: str = "", content: str = "") -> str:
+            if not path or not content: return "Error: missing 'path' or 'content'"
             return await do_write_file(self.sandbox, path, content)
 
         async def _list_files(path: str = "/challenge/challenge") -> str:
             return await do_list_files(self.sandbox, path=path)
 
-        async def _web_fetch(url: str, method: str = "GET", body: str = "") -> str:
+        async def _web_fetch(url: str = "", method: str = "GET", body: str = "") -> str:
+            if not url: return "Error: missing 'url'"
             return await do_web_fetch(url=url, method=method, body=body)
 
         async def _webhook_create() -> str:
             return await do_webhook_create()
 
-        async def _webhook_get_requests(uuid: str) -> str:
+        async def _webhook_get_requests(uuid: str = "") -> str:
+            if not uuid: return "Error: missing 'uuid'"
             return await do_webhook_get_requests(uuid)
 
         async def _check_findings() -> str:
@@ -174,12 +179,14 @@ class OpenRouterSolver:
                 return "No message bus available."
             return await do_check_findings(self.deps.message_bus, self.deps.model_spec)
 
-        async def _notify_coordinator(message: str) -> str:
+        async def _notify_coordinator(message: str = "") -> str:
+            if not message: return "Error: missing 'message'"
             if not self.deps.notify_coordinator:
                 return "No coordinator connected."
             return await self.deps.notify_coordinator(message)
 
-        async def _submit_flag(flag: str) -> str:
+        async def _submit_flag(flag: str = "") -> str:
+            if not flag: return "Error: missing 'flag'"
             flag = flag.strip()
             if self.deps.no_submit:
                 return f'DRY RUN — would accept "{flag}" but --no-submit is set.'
@@ -194,7 +201,8 @@ class OpenRouterSolver:
                 self._flag = flag
             return display
 
-        async def _view_image(filename: str) -> str:
+        async def _view_image(filename: str = "") -> str:
+            if not filename: return "Error: missing 'filename'"
             # Our custom loop does not support passing raw image bytes to the model.
             # Provide a useful text summary of what the image tool can read.
             result = await do_view_image(self.sandbox, filename, use_vision=True)
@@ -623,15 +631,15 @@ class OpenRouterSolver:
                     if retries < net_cap:
                         retries += 1
                         wait_s = min(90.0, backoff_s * (1.4 if transient_dns else 1.0))
-                        logger.warning(
-                            "[%s] %s network error — retry %d/%d in %.1fs: %s",
-                            self.agent_name,
-                            provider_label,
-                            retries,
-                            net_cap,
-                            wait_s,
-                            err_s[:120],
-                        )
+                        
+                        msg_str = "[%s] %s network error — retry %d/%d in %.1fs: %s"
+                        args = (self.agent_name, provider_label, retries, net_cap, wait_s, err_s[:120])
+                        
+                        if transient_dns and retries > 1:
+                            logger.debug(msg_str, *args)
+                        else:
+                            logger.warning(msg_str, *args)
+                            
                         await asyncio.sleep(wait_s)
                         backoff_s *= 1.7
                         continue

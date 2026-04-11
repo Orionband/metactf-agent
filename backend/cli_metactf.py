@@ -299,7 +299,11 @@ async def _run_metactf(
                                     )
                                     sw.kill()
                     except Exception as e:
-                        logger.warning("MetaCTF problems_json poll: %s", e)
+                        err_str = str(e).lower()
+                        if "name resolution" in err_str or "[errno -3]" in err_str:
+                            logger.debug("MetaCTF problems_json poll: DNS error (ignored)")
+                        else:
+                            logger.warning("MetaCTF problems_json poll: %s", e)
 
             async def stdin_skip_loop() -> None:
                 loop = asyncio.get_running_loop()

@@ -39,9 +39,14 @@ logger = logging.getLogger(__name__)
 
 KIMI_NVIDIA_SPEC = "nvidia/moonshotai/kimi-k2.5"
 GLM_NVIDIA_SPEC = "nvidia/z-ai/glm5"
-METACTF_PAY_OPENROUTER_SPEC = "openrouter/qwen/qwen3.6-plus"
+METACTF_PAY_MODELS = [
+    "openrouter/qwen/qwen3.6-plus",
+    "nvidia/moonshotai/kimi-k2.5",
+    "nvidia/google/gemma-4-31b-it",
+    "openrouter/google/gemma-4-26b-a4b-it",
+]
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
-METACTF_PARALLEL_CHALLENGES = 2
+METACTF_PARALLEL_CHALLENGES = 3
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -82,7 +87,7 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.option(
     "--pay",
     is_flag=True,
-    help="Paid OpenRouter: use only the first configured API key and qwen/qwen3.6-plus on every challenge.",
+    help="Paid mode: use only the first configured OpenRouter API key and run Qwen, Kimi, and Gemma in parallel.",
 )
 @click.option("-v", "--verbose", is_flag=True)
 def main(
@@ -101,7 +106,7 @@ def main(
 
     Points tiers: <=150 three OpenRouter + Kimi(NVIDIA); >150 adds GLM(NVIDIA) + Gemini rotate.
 
-    With --pay: only OPENROUTER_API_KEY (first key used), qwen/qwen3.6-plus only; NVIDIA/Gemini not required.
+    With --pay: uses configured pay models (Qwen, Kimi, Gemma) simultaneously on every challenge.
 
     Requires OPENROUTER_API_KEY; for >150 pt challenges, GEMINI_API_KEY must be set (unless --pay).
     For <=150 pt challenges, GEMINI_API_KEY is optional: without it, no Gemini lane is added after 60s.
@@ -199,7 +204,7 @@ async def _run_metactf(
     console.print(f"  Parallel challenges (max): {METACTF_PARALLEL_CHALLENGES} (batched)")
     if pay:
         console.print(
-            f"  Pay mode: first OpenRouter key only, model {METACTF_PAY_OPENROUTER_SPEC}"
+            f"  Pay mode: first OpenRouter key only, models {', '.join(METACTF_PAY_MODELS)}"
         )
     if custom_openrouter_spec:
         console.print(f"  Custom OpenRouter (first lane): {custom_openrouter_spec}")
@@ -228,9 +233,10 @@ async def _run_metactf(
                 console.print("[yellow]No unsolved challenges matched your filters.[/yellow]")
                 return
 
-            if not pay and not nvidia_keys:
-                console.print("[red]Set NVIDIA_API_KEY or NVIDIA_API_KEYS (needed for Kimi/GLM lanes).[/red]")
-                sys.exit(1)
+            if not nvidia_keys:
+                if not pay or any(m.startswith("nvidia/") for m in METACTF_PAY_MODELS):
+                    console.print("[red]Set NVIDIA_API_KEY or NVIDIA_API_KEYS (needed for Nvidia lanes).[/red]")
+                    sys.exit(1)
 
             if not pay:
                 needs_gemini = any(int(p.get("points") or 0) > 150 for p in selected)
@@ -242,7 +248,7 @@ async def _run_metactf(
 
             max_models = 1
             if pay:
-                max_models = 1
+                max_models = len(METACTF_PAY_MODELS)
             else:
                 for p in selected:
                     pts = int(p.get("points") or 0)
@@ -329,7 +335,7 @@ async def _run_metactf(
                 pid = int(prob.get("id") or 0)
                 pts = int(prob.get("points") or 0)
                 if pay:
-                    specs = [METACTF_PAY_OPENROUTER_SPEC]
+                    specs = list(METACTF_PAY_MODELS)
                     st = runner_settings.model_copy(update={"gemini_rotate_chain": ""})
                     slow_escalate_specs: list[str] = []
                     slow_escalate_st: Settings | None = None

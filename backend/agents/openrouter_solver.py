@@ -466,6 +466,17 @@ class OpenRouterSolver:
                     except Exception:
                         body_msg = str(e)[:500]
 
+                    bm_low = body_msg.lower()
+
+                    if status == 400 and self.provider == "nvidia" and "tool choice requires" in bm_low:
+                        logger.warning(
+                            "[%s] NVIDIA 400: Model lacks native tool support — triggering fallback.",
+                            self.agent_name,
+                        )
+                        self._findings = f"NVIDIA 400 (no tool support): {body_msg}"
+                        self.tracer.event("error", error=self._findings)
+                        return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
+
                     # Auth failure: try other keys first (if available), then fail clearly.
                     if status in (401, 403):
                         auth_failures.add(key)
@@ -492,7 +503,6 @@ class OpenRouterSolver:
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
                     if status == 429:
-                        bm_low = body_msg.lower()
                         # Upstream pool busy — not a per-key rate limit; swarm falls back to the next model.
                         if "temporarily rate-limited upstream" in bm_low:
                             logger.info(
@@ -560,7 +570,7 @@ class OpenRouterSolver:
                             rate_limited_keys.clear()
                             continue
 
-                        if "free-models-per-day" in body_msg or "per day" in body_msg.lower():
+                        if "free-models-per-day" in body_msg or "per day" in bm_low:
                             logger.warning(
                                 "[%s] %s free-tier daily quota exhausted for available keys/accounts",
                                 self.agent_name,
@@ -575,7 +585,6 @@ class OpenRouterSolver:
                         self.tracer.event("error", error=self._findings)
                         return self._result(QUOTA_ERROR, run_cost=None, run_steps=self._step_count)
 
-                    bm_low = body_msg.lower()
                     if (
                         status == 404
                         and self.provider == "openrouter"
@@ -783,4 +792,3 @@ class OpenRouterSolver:
         self.tracer.close()
         if self._owns_sandbox and self.sandbox:
             await self.sandbox.stop()
-

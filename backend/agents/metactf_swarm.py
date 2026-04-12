@@ -72,14 +72,14 @@ class MetaCTFChallengeSwarm(ChallengeSwarm):
                 )
             except Exception as e:
                 self._submitted_flags.discard(normalized)
-                display = f"MetaCTF submit failed: {e}"
+                display = f"MetaCTF submit failed for flag '{normalized}': {e}"
                 logger.warning("[%s] %s", self.meta.name, display)
                 return display, False
 
             if result.ok:
                 self.confirmed_flag = normalized
                 self.cancel_event.set()
-                logger.info("[%s] MetaCTF accepted flag", self.meta.name)
+                logger.info("[%s] MetaCTF accepted flag: %s", self.meta.name, normalized)
                 return result.display, True
 
             if result.attempts_left is not None and result.attempts_left <= _STOPL_ATTEMPTS:

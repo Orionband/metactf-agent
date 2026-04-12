@@ -44,6 +44,7 @@ METACTF_PAY_MODELS = [
     "nvidia/moonshotai/kimi-k2.5",
     "openrouter/google/gemma-4-26b-a4b-it",
     "openrouter/openai/gpt-oss-120b",
+    "openrouter/nemotron-3-super-120b-a12b:free",
 ]
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
 METACTF_PARALLEL_CHALLENGES = 3

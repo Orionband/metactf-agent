@@ -42,7 +42,6 @@ GLM_NVIDIA_SPEC = "nvidia/z-ai/glm5"
 METACTF_PAY_MODELS = [
     "openrouter/qwen/qwen3.6-plus",
     "nvidia/moonshotai/kimi-k2.5",
-    "nvidia/google/gemma-4-31b-it",
     "openrouter/google/gemma-4-26b-a4b-it",
     "openrouter/openai/gpt-oss-120b",
 ]

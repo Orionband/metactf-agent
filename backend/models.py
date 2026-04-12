@@ -21,7 +21,7 @@ DEFAULT_MODELS: list[str] = [
 ]
 
 FALLBACK_MODELS: list[str] = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "openrouter/openai/gpt-oss-120b:free",
     "openrouter/z-ai/glm-4.5-air:free",
 ]

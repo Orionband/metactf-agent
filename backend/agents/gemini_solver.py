@@ -339,6 +339,13 @@ class GeminiSolver:
             await self.deps.notify_coordinator(message)
             return "Message sent."
 
+        async def _message_operator(message: str = "", expose_file_path: str = "", **kwargs) -> str:
+            if not message: return "Error: missing 'message'"
+            if self.deps.operator_msg_fn:
+                await self.deps.operator_msg_fn(message, expose_file_path)
+                return "Message sent to operator."
+            return "No operator connected."
+
         async def _submit_flag(flag: str = "", **kwargs) -> str:
             if not flag: return "Error: missing 'flag'"
             flag = flag.strip()
@@ -371,6 +378,22 @@ class GeminiSolver:
             _ToolDef("webhook_get_requests", "Get webhook requests.", {"type": "object", "properties": {"uuid": {"type": "string"}}, "required": ["uuid"]}, _webhook_get_requests),
             _ToolDef("check_findings", "Read sibling findings.", {"type": "object", "properties": {}}, _check_findings),
             _ToolDef("notify_coordinator", "Notify coordinator.", {"type": "object", "properties": {"message": {"type": "string"}}, "required": ["message"]}, _notify_coordinator),
+            _ToolDef(
+                name="message_operator",
+                description="Send a message or file to the human operator. Use ONLY in extreme cases (e.g., OCR fails completely, or a GUI browser is required).",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                        "expose_file_path": {
+                            "type": "string",
+                            "description": "Optional container path to a file you want to send to the operator (e.g. /challenge/workspace/captcha.png)"
+                        }
+                    },
+                    "required": ["message"],
+                },
+                handler=_message_operator,
+            ),
             _ToolDef("submit_flag", "Submit candidate flag.", {"type": "object", "properties": {"flag": {"type": "string"}}, "required": ["flag"]}, _submit_flag),
             _ToolDef("view_image", "View image and summarize.", {"type": "object", "properties": {"filename": {"type": "string"}}, "required": ["filename"]}, _view_image),
         ]

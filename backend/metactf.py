@@ -248,7 +248,8 @@ def problem_to_challenge_files(problem: dict[str, Any], dest_dir: str) -> None:
     header = (
         f"<!-- MetaCTF problem_id={pid} points={pts} category={cat} -->\n"
         f"# {title}\n\n"
-        f"**Points**: {pts}  \n**Category**: {cat}\n\n"
+        f"**Points**: {pts}  \n**Category**: {cat}\n"
+        f"**Flag Format**: Typically `MetaCTF{{...}}` (though exceptions exist).\n\n"
     )
     footer = (
         "\n\n---\n"

@@ -185,6 +185,13 @@ class OpenRouterSolver:
                 return "No coordinator connected."
             return await self.deps.notify_coordinator(message)
 
+        async def _message_operator(message: str = "", expose_file_path: str = "", **kwargs) -> str:
+            if not message: return "Error: missing 'message'"
+            if self.deps.operator_msg_fn:
+                await self.deps.operator_msg_fn(message, expose_file_path)
+                return "Message sent to operator."
+            return "No operator connected."
+
         async def _submit_flag(flag: str = "", **kwargs) -> str:
             if not flag: return "Error: missing 'flag'"
             flag = flag.strip()
@@ -299,6 +306,22 @@ class OpenRouterSolver:
                     "required": ["message"],
                 },
                 handler=_notify_coordinator,
+            ),
+            _ToolDef(
+                name="message_operator",
+                description="Send a message or file to the human operator. Use ONLY in extreme cases (e.g., OCR fails completely, or a GUI browser is required).",
+                parameters_schema={
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"},
+                        "expose_file_path": {
+                            "type": "string",
+                            "description": "Optional container path to a file you want to send to the operator (e.g. /challenge/workspace/captcha.png)"
+                        }
+                    },
+                    "required": ["message"],
+                },
+                handler=_message_operator,
             ),
             _ToolDef(
                 name="submit_flag",

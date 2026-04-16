@@ -61,6 +61,9 @@ class ChallengeSwarm:
     # If set, start these model lanes after slow_solve_seconds with no winner (e.g. Gemini on low-point tiers).
     slow_solve_escalate_specs: list[str] = field(default_factory=list)
     slow_solve_escalate_settings: Settings | None = None
+    
+    # Track dynamic tasks launched via menu or escalate logic
+    _task_to_spec: dict[asyncio.Task, str] = field(default_factory=dict)
 
     def _create_solver(self, model_spec: str, solver_settings: Settings | None = None):
         st = solver_settings if solver_settings is not None else self.settings
@@ -87,6 +90,7 @@ class ChallengeSwarm:
         solver.deps.no_submit = self.no_submit
         solver.deps.submit_fn = lambda flag: self.try_submit_flag(flag, model_spec)
         solver.deps.notify_coordinator = self._make_notify_fn(model_spec)
+        solver.deps.operator_msg_fn = self._make_operator_msg_fn(model_spec)
         return solver
 
     def _make_notify_fn(self, model_spec: str):
@@ -95,6 +99,34 @@ class ChallengeSwarm:
                 self.coordinator_inbox.put_nowait(f"[{self.meta.name}/{model_spec}] {message}")
 
         return _notify
+
+    def _make_operator_msg_fn(self, model_spec: str):
+        async def _msg(message: str, file_path: str) -> None:
+            copied_path = ""
+            if file_path:
+                solver = self.solvers.get(model_spec)
+                if solver and hasattr(solver, "sandbox") and solver.sandbox:
+                    from pathlib import Path
+                    out_dir = Path("operator_files")
+                    out_dir.mkdir(exist_ok=True)
+                    safe_name = Path(file_path).name
+                    # sanitize safe_name just in case
+                    safe_name = "".join(c for c in safe_name if c.isalnum() or c in "._-")
+                    out_path = out_dir / f"{self.meta.name.replace(' ', '_')}_{safe_name}"
+                    try:
+                        await solver.sandbox.copy_from(file_path, str(out_path))
+                        copied_path = str(out_path.absolute())
+                    except Exception as e:
+                        copied_path = f"(Failed to extract file: {e})"
+            
+            from rich.console import Console
+            c = Console()
+            display_msg = f"\n[bold magenta]🔔 MESSAGE FROM AGENT ({model_spec} on '{self.meta.name}'):[/bold magenta]\n[magenta]{message}[/magenta]"
+            if copied_path:
+                display_msg += f"\n[bold cyan]📎 File extracted to:[/bold cyan] {copied_path}"
+            c.print(display_msg + "\n")
+            logger.info("[%s/%s] Sent message to operator: %s", self.meta.name, model_spec, message[:100])
+        return _msg
 
     def _gather_sibling_insights(self, exclude_model: str) -> str:
         parts: list[str] = []
@@ -144,6 +176,17 @@ class ChallengeSwarm:
                 self._submit_count[model_spec] = wrong_count + 1
                 self._last_submit_time[model_spec] = time.monotonic()
             return display, is_confirmed
+
+    def launch_solver(self, spec: str, solver_settings: Settings | None = None) -> None:
+        """Launch a solver task dynamically (used for initial launch, fallback, escalate, and manual adds)."""
+        if spec in self._started_specs:
+            return
+        self._started_specs.add(spec)
+        task = asyncio.create_task(
+            self._run_solver(spec, solver_settings), name=f"solver-{spec}"
+        )
+        self._task_to_spec[task] = spec
+        logger.info("[%s] Solver lane started: %s", self.meta.name, spec)
 
     async def _run_solver(self, model_spec: str, solver_settings: Settings | None = None) -> SolverResult | None:
         solver = self._create_solver(model_spec, solver_settings)
@@ -247,30 +290,18 @@ class ChallengeSwarm:
         return result, solver
 
     async def run(self) -> SolverResult | None:
-        task_to_spec: dict[asyncio.Task, str] = {}
+        self._task_to_spec.clear()
         fallback_queue = [s for s in self.fallback_model_specs if s not in self.model_specs]
 
-        def _launch_solver(spec: str, solver_settings: Settings | None = None) -> None:
-            if spec in self._started_specs:
-                return
-            self._started_specs.add(spec)
-            task = asyncio.create_task(
-                self._run_solver(spec, solver_settings), name=f"solver-{spec}"
-            )
-            task_to_spec[task] = spec
-            logger.info("[%s] Solver lane started: %s", self.meta.name, spec)
-
         for spec in self.model_specs:
-            _launch_solver(spec)
+            self.launch_solver(spec)
 
         slow_alert_task: asyncio.Task[None] | None = None
         if self.slow_solve_seconds and self.slow_solve_seconds > 0:
 
             async def _slow_solve_notice() -> None:
                 await asyncio.sleep(float(self.slow_solve_seconds))
-                if self.cancel_event.is_set():
-                    return
-                if self.winner is not None:
+                if self.cancel_event.is_set() or self.winner is not None:
                     return
                 msg = (
                     f"Challenge {self.meta.name!r} has not been solved yet after "
@@ -287,25 +318,29 @@ class ChallengeSwarm:
                 ):
                     esc_settings = self.slow_solve_escalate_settings or self.settings
                     for spec in self.slow_solve_escalate_specs:
-                        if spec in self._started_specs:
-                            continue
-                        logger.info(
-                            "[%s] Slow solve — adding lane(s): %s",
-                            self.meta.name,
-                            spec,
-                        )
-                        _launch_solver(spec, esc_settings)
+                        if spec not in self._started_specs:
+                            logger.info(
+                                "[%s] Slow solve — adding lane(s): %s",
+                                self.meta.name,
+                                spec,
+                            )
+                            self.launch_solver(spec, esc_settings)
 
             slow_alert_task = asyncio.create_task(_slow_solve_notice())
 
         try:
-            while task_to_spec:
+            while self._task_to_spec:
+                # Use a timeout so we periodically check if tasks were added via manual menu input
+                current_tasks = set(self._task_to_spec.keys())
                 done, pending = await asyncio.wait(
-                    set(task_to_spec.keys()), return_when=asyncio.FIRST_COMPLETED
+                    current_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=1.0
                 )
 
+                if not done:
+                    continue
+
                 for task in done:
-                    spec = task_to_spec.pop(task, "<unknown>")
+                    spec = self._task_to_spec.pop(task, "<unknown>")
                     try:
                         result = task.result()
                     except Exception:
@@ -328,36 +363,43 @@ class ChallengeSwarm:
                             spec,
                             getattr(result, "status", "crashed"),
                         )
-                        _launch_solver(next_spec)
+                        self.launch_solver(next_spec)
 
                     if result and result.status == FLAG_FOUND:
                         self.cancel_event.set()
-                        for p in pending:
+                        
+                        remaining = list(self._task_to_spec.keys())
+                        for p in remaining:
                             p.cancel()
-                        await asyncio.gather(*pending, return_exceptions=True)
-                        for p in pending:
-                            task_to_spec.pop(p, None)
+                        if remaining:
+                            await asyncio.gather(*remaining, return_exceptions=True)
+                        
+                        self._task_to_spec.clear()
                         return result
 
                 # Remove tasks that were cancelled above (if any).
-                for p in list(task_to_spec.keys()):
+                for p in list(self._task_to_spec.keys()):
                     if p.done() and p not in done:
-                        task_to_spec.pop(p, None)
+                        self._task_to_spec.pop(p, None)
 
             self.cancel_event.set()
             return self.winner
         except (asyncio.CancelledError, KeyboardInterrupt):
             self.cancel_event.set()
-            for t in task_to_spec:
+            remaining = list(self._task_to_spec.keys())
+            for t in remaining:
                 t.cancel()
-            await asyncio.gather(*task_to_spec.keys(), return_exceptions=True)
+            if remaining:
+                await asyncio.gather(*remaining, return_exceptions=True)
             return self.winner
         except Exception as e:
             logger.error("[%s] Swarm error: %s", self.meta.name, e, exc_info=True)
             self.cancel_event.set()
-            for t in task_to_spec:
+            remaining = list(self._task_to_spec.keys())
+            for t in remaining:
                 t.cancel()
-            await asyncio.gather(*task_to_spec.keys(), return_exceptions=True)
+            if remaining:
+                await asyncio.gather(*remaining, return_exceptions=True)
             return None
         finally:
             if slow_alert_task is not None:

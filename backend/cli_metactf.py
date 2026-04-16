@@ -44,6 +44,7 @@ METACTF_PAY_MODELS = [
     "nvidia/moonshotai/kimi-k2.5",
     "openrouter/google/gemma-4-26b-a4b-it",
     "openrouter/openai/gpt-oss-120b",
+    "openrouter/openai/gpt-oss-120b:free",
     "openrouter/nemotron-3-super-120b-a12b:free",
 ]
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
@@ -209,7 +210,9 @@ async def _run_metactf(
         )
     if custom_openrouter_spec:
         console.print(f"  Custom OpenRouter (first lane): {custom_openrouter_spec}")
-    console.print()
+    console.print(
+        "[dim]Press [bold]Enter[/bold] at any time to open the operator menu (skip/add models).[/dim]\n"
+    )
 
     work_parent = Path(tempfile.mkdtemp(prefix="metactf_agent_"))
     total_cost = 0.0
@@ -306,34 +309,62 @@ async def _run_metactf(
                         else:
                             logger.warning("MetaCTF problems_json poll: %s", e)
 
-            async def stdin_skip_loop() -> None:
+            async def stdin_menu_loop() -> None:
+                """Listen for Enter (\n) or 'menu' to trigger the operator actions menu."""
                 loop = asyncio.get_running_loop()
                 while True:
                     line = await loop.run_in_executor(None, sys.stdin.readline)
                     if not line:
                         break
-                    if line.strip().lower() != "skip":
+                    
+                    text = line.strip().lower()
+                    if text not in ("", "menu", "skip", "add"):
                         continue
+                        
                     async with parallel_lock:
                         pairs = list(active_parallel)
                     if not pairs:
                         console.print(
-                            "[yellow]No parallel challenges running — type 'skip' while a batch is active.[/yellow]"
+                            "[yellow]No parallel challenges running currently — wait for a batch to start.[/yellow]"
                         )
                         continue
 
-                    def _prompt() -> int:
+                    def _prompt_menu() -> tuple[str, int]:
+                        console.print("\n[bold]Operator Menu[/bold]")
+                        console.print("  1. Skip a challenge")
+                        console.print("  2. Add Gemini 3.1 Pro Preview (OpenRouter) to a challenge")
+                        console.print("  3. Cancel")
+                        action_num = click.prompt("Choose an action (1-3)", type=click.IntRange(1, 3))
+                        
+                        if action_num == 3:
+                            return ("cancel", -1)
+                        
+                        console.print("\n[bold]Active Challenges:[/bold]")
                         for i, (pid, title, _) in enumerate(pairs, 1):
                             console.print(f"  {i}. id={pid} {title!r}")
-                        return click.prompt(
-                            f"Skip which challenge (1–{len(pairs)})?",
+                        
+                        prompt_text = "Skip which challenge" if action_num == 1 else "Add Gemini Pro to which challenge"
+                        choice = click.prompt(
+                            f"{prompt_text} (1–{len(pairs)})?",
                             type=click.IntRange(1, len(pairs)),
                         )
+                        return ("skip" if action_num == 1 else "add_gemini", choice - 1)
 
-                    choice = await asyncio.to_thread(_prompt)
-                    _, _, swarm = pairs[choice - 1]
-                    swarm.kill()
-                    console.print("[yellow]Skip requested — stopping that challenge.[/yellow]")
+                    action, choice_idx = await asyncio.to_thread(_prompt_menu)
+                    
+                    if action == "cancel":
+                        console.print("[dim]Menu cancelled.[/dim]")
+                        continue
+                        
+                    _, _, swarm = pairs[choice_idx]
+                    
+                    if action == "skip":
+                        swarm.kill()
+                        console.print("[yellow]Skip requested — stopping that challenge.[/yellow]")
+                    elif action == "add_gemini":
+                        gemini_spec = "openrouter/google/gemini-3.1-pro-preview"
+                        swarm.launch_solver(gemini_spec)
+                        console.print(f"[green]Added {gemini_spec} to challenge.[/green]")
 
             async def run_challenge(index: int, prob: dict) -> tuple[float, object | None, str, int]:
                 title = str(prob.get("title") or "?")
@@ -435,9 +466,9 @@ async def _run_metactf(
                 return cost_tracker.total_cost_usd, result, title, pid
 
             poll_task = asyncio.create_task(poll_problems_json_loop(), name="metactf-poll-problems")
-            skip_task: asyncio.Task[None] | None = None
+            menu_task: asyncio.Task[None] | None = None
             if sys.stdin.isatty():
-                skip_task = asyncio.create_task(stdin_skip_loop(), name="metactf-stdin-skip")
+                menu_task = asyncio.create_task(stdin_menu_loop(), name="metactf-stdin-menu")
 
             batch_tasks: list[asyncio.Task] = []
             try:
@@ -463,10 +494,10 @@ async def _run_metactf(
                 poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await poll_task
-                if skip_task is not None:
-                    skip_task.cancel()
+                if menu_task is not None:
+                    menu_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
-                        await skip_task
+                        await menu_task
 
             for item in outcomes:
                 if isinstance(item, Exception):

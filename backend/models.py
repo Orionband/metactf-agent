@@ -36,6 +36,7 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "moonshotai/kimi-k2.5": 200_000,
     "z-ai/glm5": 200_000,
     "qwen/qwen3.6-plus": 200_000,
+    "google/gemini-3.1-pro-preview": 1_048_576,
 }
 
 VISION_MODELS: set[str] = {
@@ -46,6 +47,7 @@ VISION_MODELS: set[str] = {
     "openai/gpt-oss-120b:free",
     "z-ai/glm-4.5-air:free",
     "qwen/qwen3.6-plus",
+    "google/gemini-3.1-pro-preview",
 }
 
 

@@ -30,11 +30,12 @@ FALLBACK_PRICING: dict[str, dict[str, float]] = {
     "z-ai/glm-4.5-air:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "openai/gpt-oss-120b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "openai/gpt-oss-120b": {"input": 0.039, "cached_input": 0.0, "output": 0.19},
-    "nvidia/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
-    "nvidia/nemotron-3-super-120b-a12b": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "openai/nvidia/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "openai/nvidia/nemotron-3-super-120b-a12b": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "gemini-3-flash-preview": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "gemini-2.5-flash": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
     "gemini-flash-latest": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemini-3.1-pro-preview": {"input": 2.0, "cached_input": 0.0, "output": 12.0},
 }
 
 

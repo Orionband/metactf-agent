@@ -31,6 +31,7 @@ class SolverDeps:
     submit_fn: SubmitFn | None = None
     no_submit: bool = False
     notify_coordinator: Callable[[str], Coroutine[Any, Any, None]] | None = None
+    operator_msg_fn: Callable[[str, str], Coroutine[Any, Any, None]] | None = None
 
 
 @dataclass

@@ -2,11 +2,12 @@ CTF SANDBOX TOOLS REFERENCE
 ============================
 All tools pre-installed in the sandbox. cat /tools.txt to view this file.
 
-== NETWORKING ==
+== NETWORKING & PACKET ANALYSIS ==
 nc (netcat)        TCP/UDP connections. nc host port <<'EOF' for heredoc sessions.
 curl               HTTP client. -s silent, -k skip TLS, -d data, -H header.
 wget               HTTP download. wget -O file url.
 nmap               Port scanner. nmap -sV host, nmap -p- host.
+tshark             CLI Wireshark. Extract PCAP data: tshark -r file.pcapng -Y "http" -T fields -e http.host
 
 == BINARY ANALYSIS ==
 file               Identify file type. file binary

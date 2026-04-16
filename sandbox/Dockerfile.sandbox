@@ -8,8 +8,8 @@ ENV TERM=xterm
 
 # ── System packages ───────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
-    # Networking
-    netcat-openbsd curl wget nmap \
+    # Networking / Packet Analysis
+    netcat-openbsd curl wget nmap tshark \
     # Binary analysis
     binutils file xxd bsdmainutils binwalk \
     gdb ltrace strace \

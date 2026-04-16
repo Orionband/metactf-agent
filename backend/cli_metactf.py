@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
+import re
 import shutil
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import click
 import httpx
@@ -399,6 +400,7 @@ async def _run_metactf(
                             for line in recent:
                                 if not line.strip(): continue
                                 try:
+                                    import json
                                     d = json.loads(line)
                                     t = d.get("type", "?")
                                     if t == "tool_call":
@@ -456,7 +458,31 @@ async def _run_metactf(
                 ch_dir = str(work_parent / f"id{pid}_{slug}")
                 html_raw = str(prob.get("description") or "")
                 problem_to_challenge_files(prob, ch_dir)
+                
+                # --- AUTO-DOWNLOAD FILES ---
+                urls_to_fetch = set()
+                for match in re.finditer(r'(?:href|src)=[\'"](https?://[^\'"]+)[\'"]', html_raw, re.IGNORECASE):
+                    urls_to_fetch.add(match.group(1))
+                    
+                downloaded_files = []
+                for u in urls_to_fetch:
+                    parsed = urlparse(u)
+                    if parsed.netloc in ("metaproblems.com", "cyberlabhost.com", "static.metaproblems.com", "cfstatic.mctf.io"):
+                        if parsed.path and not parsed.path.endswith("/") and "." in parsed.path.split("/")[-1]:
+                            filename = unquote(parsed.path.split("/")[-1])
+                            try:
+                                resp = await client.get(u, follow_redirects=True, timeout=30.0)
+                                if resp.status_code == 200:
+                                    Path(ch_dir).joinpath(filename).write_bytes(resp.content)
+                                    if filename not in downloaded_files:
+                                        downloaded_files.append(filename)
+                                    console.print(f"[dim]Auto-downloaded file: {filename}[/dim]")
+                            except Exception as e:
+                                logger.warning("Failed to download %s: %s", u, e)
+                
                 meta = ChallengeMeta.from_directory(ch_dir)
+                appended_text = ""
+                
                 if is_instance_based_remote_challenge(html_raw, meta.description):
                     console.print(
                         f"[yellow]Instance-based challenge[/yellow] — {title!r} "
@@ -471,11 +497,21 @@ async def _run_metactf(
                         Path(ch_dir).joinpath("connection.txt").write_text(
                             url + "\n", encoding="utf-8"
                         )
-                        meta = ChallengeMeta.from_directory(ch_dir)
+                        appended_text += f"\n\n**TARGET URL / CONNECTION INFO:**\n{url}\n(Use this URL for all web requests and connections! Do NOT use localhost unless specifically required!)\n"
                     else:
                         console.print(
                             f"[dim]No URL saved for {title!r}; solvers may miss the live target.[/dim]"
                         )
+
+                if downloaded_files or appended_text:
+                    with open(Path(ch_dir) / "challenge.txt", "a", encoding="utf-8") as f:
+                        if downloaded_files:
+                            f.write("\n\n**DOWNLOADED FILES (available in /challenge/challenge/):**\n")
+                            for d in downloaded_files:
+                                f.write(f"- {d}\n")
+                        if appended_text:
+                            f.write(appended_text)
+                    meta = ChallengeMeta.from_directory(ch_dir)
 
                 console.print(
                     f"[bold][{index}/{len(selected)}][/bold] start {title!r} "
@@ -561,6 +597,13 @@ async def _run_metactf(
                 total_cost += cst
                 if result and getattr(result, "status", None) == FLAG_FOUND:
                     console.print(f"  [green]Solved[/green] {title!r} — {getattr(result, 'flag', None)}")
+                    
+                    log_path = getattr(result, "log_path", None)
+                    if log_path and Path(log_path).exists():
+                        safe_title = "".join(c for c in title if c.isalnum() or c in "._- ")
+                        dest = Path.cwd() / f"{safe_title}_solve_log.jsonl"
+                        shutil.copy(log_path, dest)
+                        console.print(f"  [cyan]Exported solve log to {dest.name}[/cyan]")
                 else:
                     console.print(f"  [yellow]Not solved[/yellow] {title!r}")
 

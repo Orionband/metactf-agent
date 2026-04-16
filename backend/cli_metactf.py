@@ -1,4 +1,3 @@
-"""CLI — fetch MetaCTF Compete problems, solve in parallel (tiered models), submit flags."""
 
 from __future__ import annotations
 
@@ -9,6 +8,7 @@ import re
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -51,6 +51,11 @@ METACTF_PAY_MODELS = [
 ]
 # MetaCTF: never run more than this many challenges at once (batches run one after another).
 METACTF_PARALLEL_CHALLENGES = 3
+
+
+@dataclass
+class InputCoordinator:
+    waiting_future: asyncio.Future | None = None
 
 
 def _setup_logging(verbose: bool = False) -> None:
@@ -104,17 +109,7 @@ def main(
     pay: bool,
     verbose: bool,
 ) -> None:
-    """Solve MetaCTF Compete problems using tiered models and API submission.
-
-    CONTEST_URL may be compete.metactf.com/576 or full https URL.
-
-    Points tiers: <=150 three OpenRouter + Kimi(NVIDIA); >150 adds GLM(NVIDIA) + Gemini rotate.
-
-    With --pay: uses configured pay models (Qwen, Kimi, Gemma) simultaneously on every challenge.
-
-    Requires OPENROUTER_API_KEY; for >150 pt challenges, GEMINI_API_KEY must be set (unless --pay).
-    For <=150 pt challenges, GEMINI_API_KEY is optional: without it, no Gemini lane is added after 60s.
-    """
+    """Solve MetaCTF Compete problems using tiered models and API submission."""
     _setup_logging(verbose)
 
     raw_cookie = (cookie or "").strip()
@@ -268,15 +263,16 @@ async def _run_metactf(
                     )
                     max_models = max(max_models, n)
                 if any(int(p.get("points") or 0) <= 150 for p in selected) and gemini_keys:
-                    # <=150 tiers can add Gemini rotate after 60s if still unsolved.
                     max_models += 1
             configure_semaphore(METACTF_PARALLEL_CHALLENGES * max_models)
 
             await cleanup_orphan_containers()
 
             parallel_lock = asyncio.Lock()
+            prompt_lock = asyncio.Lock()
+            input_coord = InputCoordinator()
+            
             active_parallel: list[tuple[int, str, MetaCTFChallengeSwarm]] = []
-            # Swarms still running (for poll: stop if API marks id solved elsewhere)
             running_swarms: dict[int, MetaCTFChallengeSwarm] = {}
             poll_shutdown = asyncio.Event()
 
@@ -319,6 +315,11 @@ async def _run_metactf(
                     if not line:
                         break
                     
+                    # If the prompt system is waiting for an instance URL, give it the input!
+                    if input_coord.waiting_future and not input_coord.waiting_future.done():
+                        input_coord.waiting_future.set_result(line.strip())
+                        continue
+
                     text = line.strip().lower()
                     if text not in ("", "menu", "skip", "add", "trace"):
                         continue
@@ -484,24 +485,27 @@ async def _run_metactf(
                 appended_text = ""
                 
                 if is_instance_based_remote_challenge(html_raw, meta.description):
-                    console.print(
-                        f"[yellow]Instance-based challenge[/yellow] — {title!r} "
-                        "expects a target you spawn (e.g. Kubernetes / remote instance)."
-                    )
-                    url = click.prompt(
-                        f"Spawn the container for challenge {title!r}, then paste the full challenge URL",
-                        default="",
-                        show_default=False,
-                    ).strip()
-                    if url:
-                        Path(ch_dir).joinpath("connection.txt").write_text(
-                            url + "\n", encoding="utf-8"
-                        )
-                        appended_text += f"\n\n**TARGET URL / CONNECTION INFO:**\n{url}\n(Use this URL for all web requests and connections! Do NOT use localhost unless specifically required!)\n"
-                    else:
+                    # We lock the prompt to avoid overlap if multiple instance challenges load at once
+                    async with prompt_lock:
                         console.print(
-                            f"[dim]No URL saved for {title!r}; solvers may miss the live target.[/dim]"
+                            f"[yellow]Instance-based challenge[/yellow] — {title!r}\n"
+                            "Spawn the container for this challenge on the CTF site, then paste the full challenge URL below."
                         )
+                        fut = asyncio.get_running_loop().create_future()
+                        input_coord.waiting_future = fut
+                        url_input = await fut
+                        input_coord.waiting_future = None
+                        
+                        url = url_input.strip()
+                        if url:
+                            Path(ch_dir).joinpath("connection.txt").write_text(
+                                url + "\n", encoding="utf-8"
+                            )
+                            appended_text += f"\n\n**TARGET URL / CONNECTION INFO:**\n{url}\n(Use this URL for all web requests and connections! Do NOT use localhost unless specifically required!)\n"
+                        else:
+                            console.print(
+                                f"[dim]No URL saved for {title!r}; solvers may miss the live target.[/dim]"
+                            )
 
                 if downloaded_files or appended_text:
                     with open(Path(ch_dir) / "challenge.txt", "a", encoding="utf-8") as f:
@@ -512,6 +516,10 @@ async def _run_metactf(
                         if appended_text:
                             f.write(appended_text)
                     meta = ChallengeMeta.from_directory(ch_dir)
+                
+                # Delete the physical challenge.txt so models don't waste time reading it on disk
+                # (The contents are fully loaded into `meta` and will be injected into their system prompt!)
+                (Path(ch_dir) / "challenge.txt").unlink(missing_ok=True)
 
                 console.print(
                     f"[bold][{index}/{len(selected)}][/bold] start {title!r} "
@@ -614,3 +622,218 @@ async def _run_metactf(
 
 if __name__ == "__main__":
     main()
+--- END OF FILE cli_metactf.py ---
+
+--- START OF FILE cost_tracker.py ---
+"""Per-agent cost tracking using genai-prices."""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from genai_prices import calc_price
+from pydantic_ai.usage import RunUsage
+
+logger = logging.getLogger(__name__)
+
+# Provider ID mapping for genai-prices
+PROVIDER_MAP: dict[str, str] = {
+    "openrouter": "openai",
+    "nvidia": "openai",
+}
+
+# Fallback pricing for models not in genai-prices (per 1M tokens, USD)
+FALLBACK_PRICING: dict[str, dict[str, float]] = {
+    "google/gemma-4-26b-a4b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemma-4-26b-a4b-it": {"input": 0.12, "cached_input": 0.0, "output": 0.40},
+    "google/gemma-4-31b-it:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemma-4-31b-it": {"input": 0.14, "cached_input": 0.0, "output": 0.40},
+    "google/gemma-3-27b-it": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "moonshotai/kimi-k2.5": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "qwen/qwen3.6-plus": {"input": 0.325, "cached_input": 0.0, "output": 1.95},
+    "z-ai/glm5": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "z-ai/glm-4.5-air:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "openai/gpt-oss-120b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "openai/gpt-oss-120b": {"input": 0.039, "cached_input": 0.0, "output": 0.19},
+    "nvidia/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "nvidia/nemotron-3-super-120b-a12b": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "openrouter/nemotron-3-super-120b-a12b:free": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "gemini-3-flash-preview": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "gemini-2.5-flash": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "gemini-flash-latest": {"input": 0.0, "cached_input": 0.0, "output": 0.0},
+    "google/gemini-3.1-pro-preview": {"input": 2.0, "cached_input": 0.0, "output": 12.0},
+}
+
+
+def _calc_fallback_cost(usage: RunUsage, model: str) -> float | None:
+    pricing = FALLBACK_PRICING.get(model)
+    if not pricing:
+        return None
+    input_rate = pricing.get("input", 0)
+    cached_rate = pricing.get("cached_input", input_rate)
+    output_rate = pricing.get("output", 0)
+    uncached = max(0, usage.input_tokens - usage.cache_read_tokens)
+    return (
+        (uncached * input_rate) / 1_000_000
+        + (usage.cache_read_tokens * cached_rate) / 1_000_000
+        + (usage.output_tokens * output_rate) / 1_000_000
+    )
+
+
+def calc_cost(usage: RunUsage, model_name: str, provider_spec: str = "") -> float:
+    """Calculate cost using genai-prices with fallback."""
+    if not usage.has_values():
+        return 0.0
+
+    provider_id = PROVIDER_MAP.get(provider_spec, "unknown")
+
+    try:
+        price = calc_price(usage, model_name, provider_id=provider_id)
+        return float(price.total_price)
+    except Exception:
+        pass
+
+    fallback = _calc_fallback_cost(usage, model_name)
+    if fallback is not None:
+        return fallback
+
+    logger.warning(f"Could not calculate cost for {model_name}")
+    return 0.0
+
+
+def _fmt_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(n)
+
+
+def _cache_rate(usage: RunUsage) -> str:
+    """Compute cache hit rate as a percentage string."""
+    if usage.input_tokens == 0:
+        return "n/a"
+    rate = (usage.cache_read_tokens / usage.input_tokens) * 100
+    return f"{rate:.0f}%"
+
+
+@dataclass
+class AgentUsage:
+    usage: RunUsage = field(default_factory=RunUsage)
+    model_name: str = ""
+    provider_spec: str = ""
+    duration_seconds: float = 0.0
+    cost_usd: float = 0.0
+
+
+@dataclass
+class CostTracker:
+    by_agent: dict[str, AgentUsage] = field(default_factory=dict)
+
+    def record_tokens(
+        self,
+        agent_name: str,
+        model_name: str,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cache_read_tokens: int = 0,
+        provider_spec: str = "",
+        duration_seconds: float = 0.0,
+    ) -> None:
+        """Record token usage without requiring pydantic_ai.RunUsage."""
+        usage = RunUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+        )
+        self.record(agent_name, usage, model_name, provider_spec, duration_seconds)
+
+    def record(
+        self,
+        agent_name: str,
+        usage: RunUsage,
+        model_name: str,
+        provider_spec: str = "",
+        duration_seconds: float = 0.0,
+    ) -> None:
+        cost = calc_cost(usage, model_name, provider_spec)
+
+        if agent_name not in self.by_agent:
+            self.by_agent[agent_name] = AgentUsage(
+                model_name=model_name, provider_spec=provider_spec
+            )
+
+        agent = self.by_agent[agent_name]
+        agent.usage += usage
+        agent.duration_seconds += duration_seconds
+        agent.cost_usd += cost
+
+        # Log per-step with cache rate (f-string avoids Rich handler % formatting issues)
+        logger.debug(
+            f"{agent_name}: {_fmt_tokens(usage.input_tokens)} in / "
+            f"{_fmt_tokens(usage.cache_read_tokens)} cached ({_cache_rate(usage)} hit) / "
+            f"{_fmt_tokens(usage.output_tokens)} out | ${cost:.4f} | {duration_seconds:.1f}s"
+        )
+
+    @property
+    def total_cost_usd(self) -> float:
+        return sum(a.cost_usd for a in self.by_agent.values())
+
+    @property
+    def total_tokens(self) -> int:
+        total = RunUsage()
+        for a in self.by_agent.values():
+            total += a.usage
+        return total.total_tokens
+
+    def format_usage(self, agent_name: str) -> str:
+        """Format: '45k in / 32k cached (71% hit) / 2.1k out | $0.05 | 28.3s'"""
+        agent = self.by_agent.get(agent_name)
+        if not agent:
+            return ""
+        u = agent.usage
+        return (
+            f"{_fmt_tokens(u.input_tokens)} in / "
+            f"{_fmt_tokens(u.cache_read_tokens)} cached ({_cache_rate(u)} hit) / "
+            f"{_fmt_tokens(u.output_tokens)} out | "
+            f"${agent.cost_usd:.2f} | "
+            f"{agent.duration_seconds:.1f}s"
+        )
+
+    def get_usage_by_model(self) -> dict[str, dict[str, Any]]:
+        by_model: dict[str, dict[str, Any]] = {}
+        for agent in self.by_agent.values():
+            model = agent.model_name
+            if model not in by_model:
+                by_model[model] = {"cost": 0.0, "input": 0, "cached": 0, "output": 0}
+            by_model[model]["cost"] += agent.cost_usd
+            by_model[model]["input"] += agent.usage.input_tokens
+            by_model[model]["cached"] += agent.usage.cache_read_tokens
+            by_model[model]["output"] += agent.usage.output_tokens
+        return by_model
+
+    def log_summary(self) -> None:
+        """Log summary grouped by model with cache hit rates."""
+        by_model = self.get_usage_by_model()
+        for model, s in by_model.items():
+            hit_rate = f"{(s['cached'] / s['input'] * 100):.0f}%" if s["input"] > 0 else "n/a"
+            logger.info(
+                "  %s: $%.2f | %s in / %s cached (%s hit) / %s out",
+                model, s["cost"],
+                _fmt_tokens(s["input"]),
+                _fmt_tokens(s["cached"]),
+                hit_rate,
+                _fmt_tokens(s["output"]),
+            )
+        total = sum(s["input"] for s in by_model.values())
+        total_cached = sum(s["cached"] for s in by_model.values())
+        overall_hit = f"{(total_cached / total * 100):.0f}%" if total > 0 else "n/a"
+        logger.info(
+            "  Total: $%.2f | %s tokens | %s overall cache hit rate",
+            self.total_cost_usd,
+            _fmt_tokens(self.total_tokens),
+            overall_hit,
+        )

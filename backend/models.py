@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 # Default model specs
 DEFAULT_MODELS: list[str] = [
-    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "nvidia/moonshotai/kimi-k2.5",
     "nvidia/google/gemma-4-31b-it",
     "openrouter/openai/gpt-oss-120b:free",
